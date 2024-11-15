@@ -23,8 +23,8 @@ void cql3::statements::index_prop_defs::validate() {
         throw exceptions::invalid_request_exception("CUSTOM index requires specifying the index class");
     }
 
-    if (!is_custom && custom_class) {
-        throw exceptions::invalid_request_exception("Cannot specify index class for a non-CUSTOM index");
+    if (!is_custom && custom_class && *custom_class != "dummy-vector-backend") {
+        throw exceptions::invalid_request_exception("Cannot specify non-vector index class for a non-CUSTOM index");
     }
     if (!is_custom && !_properties.empty()) {
         throw exceptions::invalid_request_exception("Cannot specify options for a non-CUSTOM index");

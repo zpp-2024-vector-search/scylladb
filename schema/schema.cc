@@ -844,6 +844,11 @@ sstring schema::get_create_statement(const schema_describe_helper& helper, bool 
                     << cql3::util::maybe_quote(ks_name()) << "." << cql3::util::maybe_quote(view_info()->base_name());
 
             describe_index_columns(os, is_local, *this, helper.find_schema(view_info()->base_id()));
+            auto custom_index_class = helper.custom_index_class(view_info()->base_id(), *this);
+            if (custom_index_class) {
+                os << " USING \'" << *custom_index_class <<"\'";
+            }
+
             os << ";\n";
 
             return std::move(os).str();

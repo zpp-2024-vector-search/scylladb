@@ -67,13 +67,13 @@ create_index_statement::validate(query_processor& qp, const service::client_stat
     if (_raw_targets.empty() && !_properties->is_custom) {
         throw exceptions::invalid_request_exception("Only CUSTOM indexes can be created without specifying a target column");
     }
-
+    
     _properties->validate();
 }
 
 std::vector<::shared_ptr<index_target>> create_index_statement::validate_while_executing(data_dictionary::database db) const {
     auto schema = validation::validate_column_family(db, keyspace(), column_family());
-
+    auto classes = db.find_column_family(schema).get_index_manager().supported_custom_classes(db.features());
     if (schema->is_counter()) {
         throw exceptions::invalid_request_exception("Secondary indexes are not supported on counter tables");
     }
@@ -88,7 +88,11 @@ std::vector<::shared_ptr<index_target>> create_index_statement::validate_while_e
     }
 
     validate_for_local_index(*schema);
-
+    
+    if (_properties && _properties->custom_class && !classes.contains(*(_properties->custom_class))) {
+        throw exceptions::invalid_request_exception(format("Non-supported custom class \'{}\' provided", *(_properties->custom_class)));
+    }
+    
     std::vector<::shared_ptr<index_target>> targets;
     for (auto& raw_target : _raw_targets) {
         targets.emplace_back(raw_target->prepare(*schema));
@@ -341,9 +345,9 @@ std::optional<create_index_statement::base_schema_with_new_index> create_index_s
     }
     index_metadata_kind kind;
     index_options_map index_options;
-    if (_properties->is_custom) {
-        kind = index_metadata_kind::custom;
+    if (_properties->custom_class || _properties->is_custom) {
         index_options = _properties->get_options();
+        kind = index_metadata_kind::custom;
     } else {
         kind = schema->is_compound() ? index_metadata_kind::composites : index_metadata_kind::keys;
     }

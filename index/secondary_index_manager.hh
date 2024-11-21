@@ -10,11 +10,14 @@
 
 #pragma once
 
+#include "gms/feature_service.hh"
 #include "schema/schema.hh"
 
 #include "data_dictionary/data_dictionary.hh"
 #include "cql3/statements/index_target.hh"
 
+#include <set>
+#include <string_view>
 #include <vector>
 
 namespace cql3::expr {
@@ -99,6 +102,8 @@ public:
     bool is_index(view_ptr) const;
     bool is_index(const schema& s) const;
     bool is_global_index(const schema& s) const;
+    std::optional<sstring> custom_index_class(const schema& s) const;
+    std::set<std::string_view> supported_custom_classes(const gms::feature_service& fs) const;
 private:
     void add_index(const index_metadata& im);
 };

@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include "gms/feature_service.hh"
 #include "property_definitions.hh"
 #include <seastar/core/sstring.hh>
 

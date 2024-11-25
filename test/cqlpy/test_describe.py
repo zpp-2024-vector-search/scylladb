@@ -477,9 +477,11 @@ def test_desc_index(cql, test_keyspace):
         has_local = is_scylla(cql)
         if has_local:
             create_idx_ab = f"CREATE INDEX ON {tbl}((a), b)"
+        create_idx_d = f"CREATE INDEX custom ON {tbl}(c) USING 'dummy-vector-backend'"
 
         cql.execute(create_idx_b)
         cql.execute(create_idx_c)
+        cql.execute(create_idx_d)
         if has_local:
             cql.execute(create_idx_ab)
 
@@ -487,6 +489,7 @@ def test_desc_index(cql, test_keyspace):
         if has_local:
             ab_desc = cql.execute(f"DESC INDEX {test_keyspace}.{tbl_name}_b_idx_1").one().create_statement
         c_desc = cql.execute(f"DESC INDEX {test_keyspace}.named_index").one().create_statement
+        d_desc = cql.execute(f"DESC INDEX {test_keyspace}.custom").one().create_statement
 
         # Cassandra inserts a space between the table name and parentheses,
         # Scylla doesn't. This difference doesn't matter because both are
@@ -500,6 +503,7 @@ def test_desc_index(cql, test_keyspace):
             assert f"CREATE INDEX {tbl_name}_b_idx_1 ON {tbl}((a), b)" in ab_desc
         
         assert f"CREATE INDEX named_index ON {tbl}{maybe_space}(c)" in c_desc
+        assert f"CREATE INDEX custom ON {tbl}{maybe_space}(c) USING 'dummy-vector-backend'" in d_desc
 
 def test_desc_index_on_collections(cql, test_keyspace):
     # In this test, all assertions are in form of

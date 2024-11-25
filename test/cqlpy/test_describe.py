@@ -476,11 +476,28 @@ def test_desc_index(cql, test_keyspace):
         create_idx_c = f"CREATE INDEX named_index ON {tbl}(c)"
         # Only Scylla supports local indexes
         has_local = is_scylla(cql)
+
+        # Cassandra inserts a space between the table name and parentheses,
+        # Scylla doesn't. This difference doesn't matter because both are
+        # valid CQL commands
+        # Scylla doesn't support sai custom class.
+        if is_scylla(cql):
+            maybe_space = ''
+            custom_class = 'dummy-vector-backend'
+        else:
+            maybe_space = ' '
+            custom_class =  'sai'
+
+
         if has_local:
             create_idx_ab = f"CREATE INDEX ON {tbl}((a), b)"
+        create_idx_d = f"CREATE INDEX custom ON {tbl}(c) USING '{custom_class}'"
+        create_idx_e = f"CREATE CUSTOM INDEX custom1 ON {tbl}(b) USING '{custom_class}'"
 
         cql.execute(create_idx_b)
         cql.execute(create_idx_c)
+        cql.execute(create_idx_d)
+        cql.execute(create_idx_e)
         if has_local:
             cql.execute(create_idx_ab)
 
@@ -488,20 +505,25 @@ def test_desc_index(cql, test_keyspace):
         if has_local:
             ab_desc = cql.execute(f"DESC INDEX {test_keyspace}.{tbl_name}_b_idx_1").one().create_statement
         c_desc = cql.execute(f"DESC INDEX {test_keyspace}.named_index").one().create_statement
-
-        # Cassandra inserts a space between the table name and parentheses,
-        # Scylla doesn't. This difference doesn't matter because both are
-        # valid CQL commands
-        if is_scylla(cql):
-            maybe_space = ''
-        else:
-            maybe_space = ' '
+        d_desc = cql.execute(f"DESC INDEX {test_keyspace}.custom").one().create_statement
+        e_desc = cql.execute(f"DESC INDEX {test_keyspace}.custom1").one().create_statement
+        
         assert f"CREATE INDEX {tbl_name}_b_idx ON {tbl}{maybe_space}(b)" in b_desc
         if has_local:
             assert f"CREATE INDEX {tbl_name}_b_idx_1 ON {tbl}((a), b)" in ab_desc
         
         assert f"CREATE INDEX named_index ON {tbl}{maybe_space}(c)" in c_desc
+        assert f"CREATE CUSTOM INDEX custom ON {tbl}{maybe_space}(c) USING '{custom_class}'" in d_desc
+        assert f"CREATE CUSTOM INDEX custom1 ON {tbl}{maybe_space}(b) USING '{custom_class}'" in e_desc
 
+        with pytest.raises(InvalidRequest):
+            cql.execute(f"CREATE INDEX custom ON {tbl}(b) USING '{custom_class}'")
+        invalid_custom_class = "invalid.custom.class"
+        with pytest.raises(InvalidRequest):
+            cql.execute(f"CREATE CUSTOM INDEX invalid_idx ON {tbl}(b) USING '{invalid_custom_class}'")
+        with pytest.raises(InvalidRequest):
+            cql.execute(f"CREATE CUSTOM INDEX no_class_idx ON {tbl}(b)")
+        
 def test_desc_index_on_collections(cql, test_keyspace):
     # In this test, all assertions are in form of
     # `assert create_stmt in desc or create_stmt.replace("(", " (", 1) in desc`

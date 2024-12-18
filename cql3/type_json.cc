@@ -9,6 +9,7 @@
 #include "cql3/type_json.hh"
 #include "concrete_types.hh"
 #include "counters.hh"
+#include "types/vector.hh"
 #include "utils/rjson.hh"
 #include "types/list.hh"
 #include "types/map.hh"
@@ -88,7 +89,7 @@ template <typename T> static T to_int(const rjson::value& value) {
     } else if (value.IsUint64()) {
         uint64_t u64_result = value.GetUint64();
 
-        if (std::cmp_greater(std::numeric_limits<T>::min(), u64_result) 
+        if (std::cmp_greater(std::numeric_limits<T>::min(), u64_result)
         || std::cmp_greater(u64_result, std::numeric_limits<T>::max())) {
             throw marshal_exception(format("Value {} out of range", u64_result));
         }
@@ -230,6 +231,32 @@ static bytes from_json_object_aux(const tuple_type_impl& t, const rjson::value& 
     return t.build_value(std::move(raw_tuple));
 }
 
+static bytes from_json_object_aux(const vector_type_impl& t, const rjson::value& value) {
+    if (!value.IsArray()) {
+        throw marshal_exception("vector_type must be represented as JSON Array");
+    }
+    
+    if (value.Size() > t.get_dimension()) {
+        throw marshal_exception(
+                format("Too many values ({}) for vector with size {}", value.Size(), t.get_dimension()));
+    }
+    
+    if (value.Size() < t.get_dimension()) {
+        throw marshal_exception(
+                format("Too few values ({}) for vector with size {}", value.Size(), t.get_dimension()));
+    }
+
+    std::vector<bytes> raw_vector;
+    raw_vector.reserve(value.Size());
+
+    auto type = t.get_elements_type();
+
+    for (auto vi = value.Begin(); vi != value.End(); ++vi) {
+        raw_vector.emplace_back(from_json_object(*type, *vi));
+    }
+    return vector_type_impl::build_value(std::move(raw_vector), t.value_length_if_fixed());
+}
+
 static bytes from_json_object_aux(const user_type_impl& ut, const rjson::value& value) {
     if (!value.IsObject()) {
         throw marshal_exception("user_type must be represented as JSON Object");
@@ -354,6 +381,7 @@ struct from_json_object_visitor {
     bytes operator()(const set_type_impl& t) { return from_json_object_aux(t, value); }
     bytes operator()(const list_type_impl& t) { return from_json_object_aux(t, value); }
     bytes operator()(const tuple_type_impl& t) { return from_json_object_aux(t, value); }
+    bytes operator()(const vector_type_impl& t) { return from_json_object_aux(t, value); }
     bytes operator()(const user_type_impl& t) { return from_json_object_aux(t, value); }
 };
 }
@@ -468,6 +496,22 @@ static sstring to_json_string_aux(const tuple_type_impl& t, bytes_view bv) {
     return std::move(out).str();
 }
 
+static sstring to_json_string_aux(const vector_type_impl& t, bytes_view bv) {
+    std::ostringstream out;
+    out << '[';
+
+    for (size_t i = 0; i < t.get_dimension(); ++i) {
+        if (i != 0) {
+            out << ", ";
+        }
+
+        out << to_json_string(*t.get_elements_type(), read_vector_element(bv, *t.get_elements_type()->value_length_if_fixed()));
+    }
+
+    out << ']';
+    return std::move(out).str();
+}
+
 static sstring to_json_string_aux(const user_type_impl& t, bytes_view bv) {
     std::ostringstream out;
     out << '{';
@@ -522,6 +566,7 @@ struct to_json_string_visitor {
     sstring operator()(const set_type_impl& t) { return to_json_string_aux(t, bv); }
     sstring operator()(const list_type_impl& t) { return to_json_string_aux(t, bv); }
     sstring operator()(const tuple_type_impl& t) { return to_json_string_aux(t, bv); }
+    sstring operator()(const vector_type_impl& t) { return to_json_string_aux(t, bv); }
     sstring operator()(const user_type_impl& t) { return to_json_string_aux(t, bv); }
     sstring operator()(const simple_date_type_impl& t) { return quote_json_string(t.to_string(bv)); }
     sstring operator()(const time_type_impl& t) { return quote_json_string(t.to_string(bv)); }

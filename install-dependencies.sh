@@ -142,6 +142,7 @@ declare -A pip_packages=(
     [treelib]=
     [allure-pytest]=
     [pytest-xdist]=
+    [opensearch-py]=
 )
 
 pip_symlinks=(

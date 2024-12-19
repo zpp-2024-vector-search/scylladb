@@ -13,6 +13,7 @@ from typing import List, Optional, Dict
 from test.pylib.random_tables import RandomTables
 from test.pylib.util import unique_name
 from test.pylib.manager_client import ManagerClient, IPAddress
+from test.pylib.opensearch_cluster import OpenSearchCluster
 from test.pylib.async_cql import event_loop, run_async
 import logging
 import pytest
@@ -222,6 +223,15 @@ async def manager(request, manager_internal, record_property, build_mode):
 @pytest.fixture(scope="function")
 def cql(manager):
     yield manager.cql
+
+@pytest.fixture(scope="function")
+async def opensearch():
+    cluster = OpenSearchCluster(logger=logging.getLogger())
+    await cluster.install_and_start()
+    yield cluster
+    await cluster.uninstall()
+
+
 
 # "random_tables" fixture: Creates and returns a temporary RandomTables object
 # used in tests to make schema changes. Tables are dropped after test finishes

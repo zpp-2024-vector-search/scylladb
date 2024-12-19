@@ -21,6 +21,12 @@ from cassandra.auth import PlainTextAuthProvider
 
 logger = logging.getLogger(__name__)
 
+
+@pytest.mark.asyncio
+async def test_opensearch_basic(opensearch):
+    await opensearch.get_info()
+
+
 @pytest.mark.asyncio
 async def test_service_levels_snapshot(manager: ManagerClient):
     """

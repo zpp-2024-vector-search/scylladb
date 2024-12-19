@@ -24,6 +24,8 @@
 #include "types/list.hh"
 #include "types/map.hh"
 #include "types/set.hh"
+#include "types/types.hh"
+#include "types/vector.hh"
 #include "utils/like_matcher.hh"
 #include "query-result-reader.hh"
 #include "types/user.hh"
@@ -69,6 +71,7 @@ unresolved_identifier::~unresolved_identifier() = default;
 static cql3::raw_value do_evaluate(const bind_variable&, const evaluation_inputs&);
 static cql3::raw_value do_evaluate(const tuple_constructor&, const evaluation_inputs&);
 static cql3::raw_value do_evaluate(const collection_constructor&, const evaluation_inputs&);
+static cql3::raw_value do_evaluate(const vector_constructor&, const evaluation_inputs&);
 static cql3::raw_value do_evaluate(const usertype_constructor&, const evaluation_inputs&);
 static cql3::raw_value do_evaluate(const function_call&, const evaluation_inputs&);
 
@@ -730,7 +733,7 @@ auto fmt::formatter<cql3::expr::expression::printer>::format(const cql3::expr::e
             },
             [&] (const collection_constructor& cc) {
                 switch (cc.style) {
-                case collection_constructor::style_type::list: {
+                case collection_constructor::style_type::list_or_vector: {
                     out = fmt::format_to(out, "[{}]", fmt::join(cc.elements | std::views::transform(to_printer), ", "));
                     return;
                 }
@@ -757,6 +760,9 @@ auto fmt::formatter<cql3::expr::expression::printer>::format(const cql3::expr::e
                 }
                 }
                 on_internal_error(expr_logger, fmt::format("unexpected collection_constructor style {}", static_cast<unsigned>(cc.style)));
+            },
+            [&] (const vector_constructor& vc) {
+                out = fmt::format_to(out, "[{}]", fmt::join(vc.elements | std::views::transform(to_printer), ", "));
             },
             [&] (const usertype_constructor& uc) {
                 out = fmt::format_to(out, "{{");
@@ -897,6 +903,14 @@ bool recurse_until(const expression& e, const noncopyable_function<bool (const e
                 }
                 return false;
             },
+            [&] (const vector_constructor& v) {
+                for (auto& e : v.elements) {
+                    if (auto found = recurse_until(e, predicate_fun)) {
+                        return found;
+                    }
+                }
+                return false;
+            },
             [&] (const usertype_constructor& c) {
                 for (auto& [k, v] : c.elements) {
                     if (auto found = recurse_until(v, predicate_fun)) {
@@ -950,6 +964,14 @@ expression search_and_replace(const expression& e,
                             | std::views::transform(recurse)
                             | std::ranges::to<std::vector>(),
                         c.type
+                    };
+                },
+                [&] (const vector_constructor& vc) -> expression {
+                    return vector_constructor{
+                        vc.elements
+                            | std::views::transform(recurse)
+                            | std::ranges::to<std::vector>(),
+                        vc.type
                     };
                 },
                 [&] (const usertype_constructor& uc) -> expression {
@@ -1324,6 +1346,20 @@ static managed_bytes reserialize_value(View value_bytes,
         return tuple_type_impl::build_value_fragmented(std::move(elements));
     }
 
+    if (type.is_vector()) {
+        const vector_type_impl& vtype = dynamic_cast<const vector_type_impl&>(type);
+        std::vector<managed_bytes> elements = vtype.split_fragmented(value_bytes);
+
+        auto elements_type = vtype.get_elements_type()->without_reversed();
+
+        if (elements_type.bound_value_needs_to_be_reserialized()) {
+            for (size_t i = 0; i < elements.size(); i++) {
+                elements[i] = reserialize_value(managed_bytes_view(elements[i]), elements_type);
+            }
+        }
+
+        return vector_type_impl::build_value_fragmented(std::move(elements), elements_type.value_length_if_fixed());
+    }
     on_internal_error(expr_logger,
         fmt::format("Reserializing type that shouldn't need reserialization: {}", type.name()));
 }
@@ -1498,7 +1534,7 @@ static cql3::raw_value do_evaluate(const collection_constructor& collection, con
     }
 
     switch (collection.style) {
-        case collection_constructor::style_type::list:
+        case collection_constructor::style_type::list_or_vector:
             return evaluate_list(collection, inputs);
 
         case collection_constructor::style_type::set:
@@ -1508,6 +1544,27 @@ static cql3::raw_value do_evaluate(const collection_constructor& collection, con
             return evaluate_map(collection, inputs);
     }
     std::abort();
+}
+
+static cql3::raw_value do_evaluate(const vector_constructor& vector, const evaluation_inputs& inputs) {
+    if (vector.type.get() == nullptr) {
+        on_internal_error(expr_logger,
+            "evaluate(vector_constructor) called with nullptr type, should be prepared first");
+    }
+
+    std::vector<managed_bytes> vector_elements;
+    vector_elements.reserve(vector.elements.size());
+
+    for (const expression& element : vector.elements) {
+        cql3::raw_value elem_val = evaluate(element, inputs);
+        if (elem_val.is_null()) {
+            throw exceptions::invalid_request_exception("null is not supported inside vectors");
+        }
+        vector_elements.emplace_back(std::move(elem_val).to_managed_bytes());
+    }
+
+    managed_bytes vector_bytes = vector_type_impl::build_value_fragmented(std::move(vector_elements), vector.type->value_length_if_fixed());
+    return raw_value::make_value(std::move(vector_bytes));
 }
 
 static cql3::raw_value do_evaluate(const usertype_constructor& user_val, const evaluation_inputs& inputs) {
@@ -1636,6 +1693,16 @@ std::vector<managed_bytes_opt> get_tuple_elements(const cql3::raw_value& val, co
     });
 }
 
+std::vector<managed_bytes> get_vector_elements(const cql3::raw_value& val, const abstract_type& type) {
+    ensure_can_get_value_elements(val, "expr::get_vector_elements");
+
+    return val.view().with_value([&](const FragmentedView auto& value_bytes) {
+        const vector_type_impl& vtype = static_cast<const vector_type_impl&>(type.without_reversed());
+        return vtype.split_fragmented(value_bytes);
+    });
+
+}
+
 std::vector<managed_bytes_opt> get_user_type_elements(const cql3::raw_value& val, const abstract_type& type) {
     ensure_can_get_value_elements(val, "expr::get_user_type_elements");
 
@@ -1646,6 +1713,11 @@ std::vector<managed_bytes_opt> get_user_type_elements(const cql3::raw_value& val
 }
 
 static std::vector<managed_bytes_opt> convert_listlike(utils::chunked_vector<managed_bytes_opt>&& elements) {
+    return std::vector<managed_bytes_opt>(std::make_move_iterator(elements.begin()),
+                                          std::make_move_iterator(elements.end()));
+}
+
+static std::vector<managed_bytes_opt> convert_vector(std::vector<managed_bytes>&& elements) {
     return std::vector<managed_bytes_opt>(std::make_move_iterator(elements.begin()),
                                           std::make_move_iterator(elements.end()));
 }
@@ -1666,6 +1738,8 @@ std::vector<managed_bytes_opt> get_elements(const cql3::raw_value& val, const ab
         case abstract_type::kind::user:
             return get_user_type_elements(val, type);
 
+        case abstract_type::kind::vector:
+            return convert_vector(get_vector_elements(val, type));
         default:
             on_internal_error(expr_logger, fmt::format("expr::get_elements called on bad type: {}", type.name()));
     }
@@ -1699,6 +1773,11 @@ void fill_prepare_context(expression& e, prepare_context& ctx) {
         },
         [&](collection_constructor& c) {
             for (expr::expression& element : c.elements) {
+                fill_prepare_context(element, ctx);
+            }
+        },
+        [&](vector_constructor& v) {
+            for (expr::expression& element : v.elements) {
                 fill_prepare_context(element, ctx);
             }
         },
@@ -2119,6 +2198,9 @@ aggregation_depth(const cql3::expr::expression& e) {
         [] (const collection_constructor& cc) {
             return max_over_range(cc.elements);
         },
+        [] (const vector_constructor& vc) {
+            return max_over_range(vc.elements);
+        },
         [] (const usertype_constructor& uc) {
             return max_over_range(uc.elements | std::views::values);
         }
@@ -2206,6 +2288,10 @@ levellize_aggregation_depth(const cql3::expr::expression& e, unsigned desired_de
         [&] (collection_constructor cc) -> expression {
             recurse_over_range(cc.elements);
             return cc;
+        },
+        [&] (vector_constructor vc) -> expression {
+            recurse_over_range(vc.elements);
+            return vc;
         },
         [&] (usertype_constructor uc) -> expression {
             recurse_over_range(uc.elements | std::views::values);

@@ -231,7 +231,6 @@ async def opensearch():
     cluster = OpenSearchCluster(logger=logging.getLogger())
     await cluster.install_and_start()
     yield cluster
-    await cluster.uninstall()
 
 
 

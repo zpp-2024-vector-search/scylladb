@@ -72,7 +72,7 @@ class OpenSearchServer:
             await self.stop()
             raise
 
-    def check_scylla_executable(self) -> None:
+    def check_opensearch_executable(self) -> None:
         """Check if executable exists and can be run"""
         if not os.access(self.exe, os.X_OK):
             raise RuntimeError(f"{self.exe} is not executable")        
@@ -81,7 +81,7 @@ class OpenSearchServer:
         """Create a working directory with all subdirectories, initialize
         a configuration file."""
 
-        self.check_scylla_executable()
+        self.check_opensearch_executable()
 
         self.logger.info("installing Scylla server in %s...", self.workdir)
 
@@ -191,7 +191,7 @@ class OpenSearchCluster:
         """Setup initial servers and start them.
            Catch and save any startup exception"""
         try:
-            self.add_server()
+            await self.add_server()
         except Exception as exc:
             # If start fails, swallow the error to throw later,
             # at test time.
@@ -207,13 +207,6 @@ class OpenSearchCluster:
     async def add_server(self) -> None:
         server = OpenSearchServer(self.api, "~/opensearch-2.18.0/bin/opensearch", "~/test", self.logger)
         await server.install_and_start()
-        self.running[server.server_id]
 
     async def get_info(self): 
         await self.api.info()
-    
-logger = logging.getLogger()
-
-opensearch = OpenSearchServer(logger)
-loop = asyncio.new_event_loop()
-loop.run_until_complete(asyncio.wait([loop.create_task(opensearch.install_and_start())]))

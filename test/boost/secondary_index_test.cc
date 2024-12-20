@@ -691,7 +691,7 @@ SEASTAR_TEST_CASE(test_secondary_index_collections) {
 // combination of parameters related to custom indexes are rejected as well.
 SEASTAR_TEST_CASE(test_secondary_index_create_custom_index) {
     return do_with_cql_env_thread([] (cql_test_env& e) {
-        e.execute_cql("create table cf (p int primary key, a int)").get();
+        e.execute_cql("create table cf (p int primary key, a int, b int)").get();
         // Creating an index on column a works, obviously.
         e.execute_cql("create index on cf (a)").get();
         // The following is legal syntax on Cassandra, to create a SASI index.
@@ -708,11 +708,13 @@ SEASTAR_TEST_CASE(test_secondary_index_create_custom_index) {
         // "exceptions::invalid_request_exception: CUSTOM index requires
         // specifying the index class"
         assert_that_failed(e.execute_cql("create custom index on cf (a)"));
-        // It's also a syntax error to try to specify a "USING" without
-        // specifying CUSTOM. We expect the exception:
-        // "exceptions::invalid_request_exception: Cannot specify index class
-        // for a non-CUSTOM index"
-        assert_that_failed(e.execute_cql("create index on cf (a) using 'org.apache.cassandra.index.sasi.SASIIndex'"));
+        // This is the default syntax for specifying a custom index and we 
+        // 'support' "dummy-vector-backend". This should work.
+        e.execute_cql("create custom index on cf (a) using 'dummy-vector-backend'").get();
+        // It's not a syntax error to try to specify a "USING" without
+        // specifying CUSTOM. This should work.
+        e.execute_cql("create index on cf (b) using 'dummy-vector-backend'").get();
+        
     });
 }
 

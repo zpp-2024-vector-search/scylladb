@@ -1650,26 +1650,6 @@ vector_type_impl::get_instance(data_type elements, size_t dimension) {
     return intern::get_instance(elements, dimension);
 }
 
-bytes_view read_vector_element(bytes_view& v, std::optional<size_t> value_length_if_fixed) {
-    int32_t element_size = 0;
-    if (value_length_if_fixed) {
-        element_size = value_length_if_fixed.value();
-    }
-    else {
-        element_size = read_simple<int32_t>(v);
-    }
-    
-    if (element_size < 0) {
-        throw exceptions::invalid_request_exception("null/unset is not supported inside vectors");
-    }
-
-    if ((size_t)element_size > v.size()) {
-        throw exceptions::invalid_request_exception("Not enough bytes to read a vector element");
-    }   
-    return read_simple_bytes(v, element_size);
-}
-
-
 static void serialize_vector(const vector_type_impl& type, const vector_type_impl::native_type* val, bytes::iterator& out) {
     auto elements_type = type.get_elements_type();
     if (type.value_length_if_fixed()) {

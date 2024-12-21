@@ -498,6 +498,8 @@ static sstring to_json_string_aux(const tuple_type_impl& t, bytes_view bv) {
 
 static sstring to_json_string_aux(const vector_type_impl& t, bytes_view bv) {
     std::ostringstream out;
+    auto fv = basic_single_fragmented_view<mutable_view::no>(bv);
+
     out << '[';
 
     for (size_t i = 0; i < t.get_dimension(); ++i) {
@@ -505,7 +507,7 @@ static sstring to_json_string_aux(const vector_type_impl& t, bytes_view bv) {
             out << ", ";
         }
 
-        out << to_json_string(*t.get_elements_type(), read_vector_element(bv, *t.get_elements_type()->value_length_if_fixed()));
+        out << to_json_string(*t.get_elements_type(), read_vector_element(fv, *t.get_elements_type()->value_length_if_fixed()).current_fragment());
     }
 
     out << ']';

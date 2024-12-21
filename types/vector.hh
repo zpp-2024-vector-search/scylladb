@@ -97,8 +97,6 @@ private:
 
 };
 
-bytes_view read_vector_element(bytes_view& v, std::optional<size_t> value_length_if_fixed);
-
 template <FragmentedView View>
 View read_vector_element(View& v, std::optional<size_t> value_length_if_fixed) {
     int32_t element_size = 0;

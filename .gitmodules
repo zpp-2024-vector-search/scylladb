@@ -17,4 +17,4 @@
 	url = ../scylla-python3
 [submodule "tools/cqlsh"]
 	path = tools/cqlsh
-	url = ../scylla-cqlsh
+	url = https://github.com/zpp-2024-vector-search/scylla-cqlsh.git

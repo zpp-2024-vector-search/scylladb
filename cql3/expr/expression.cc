@@ -70,6 +70,7 @@ unresolved_identifier::~unresolved_identifier() = default;
 static cql3::raw_value do_evaluate(const bind_variable&, const evaluation_inputs&);
 static cql3::raw_value do_evaluate(const tuple_constructor&, const evaluation_inputs&);
 static cql3::raw_value do_evaluate(const collection_constructor&, const evaluation_inputs&);
+static cql3::raw_value do_evaluate(const vector_constructor&, const evaluation_inputs&);
 static cql3::raw_value do_evaluate(const usertype_constructor&, const evaluation_inputs&);
 static cql3::raw_value do_evaluate(const function_call&, const evaluation_inputs&);
 
@@ -759,6 +760,9 @@ auto fmt::formatter<cql3::expr::expression::printer>::format(const cql3::expr::e
                 }
                 on_internal_error(expr_logger, fmt::format("unexpected collection_constructor style {}", static_cast<unsigned>(cc.style)));
             },
+            [&] (const vector_constructor& vc) {
+                out = fmt::format_to(out, "[{}]", fmt::join(vc.elements | std::views::transform(to_printer), ", "));
+            },
             [&] (const usertype_constructor& uc) {
                 out = fmt::format_to(out, "{{");
                 bool first = true;
@@ -898,6 +902,14 @@ bool recurse_until(const expression& e, const noncopyable_function<bool (const e
                 }
                 return false;
             },
+            [&] (const vector_constructor& v) {
+                for (auto& e : v.elements) {
+                    if (auto found = recurse_until(e, predicate_fun)) {
+                        return found;
+                    }
+                }
+                return false;
+            },
             [&] (const usertype_constructor& c) {
                 for (auto& [k, v] : c.elements) {
                     if (auto found = recurse_until(v, predicate_fun)) {
@@ -951,6 +963,14 @@ expression search_and_replace(const expression& e,
                             | std::views::transform(recurse)
                             | std::ranges::to<std::vector>(),
                         c.type
+                    };
+                },
+                [&] (const vector_constructor& vc) -> expression {
+                    return vector_constructor{
+                        vc.elements
+                            | std::views::transform(recurse)
+                            | std::ranges::to<std::vector>(),
+                        vc.type
                     };
                 },
                 [&] (const usertype_constructor& uc) -> expression {
@@ -1525,6 +1545,27 @@ static cql3::raw_value do_evaluate(const collection_constructor& collection, con
     std::abort();
 }
 
+static cql3::raw_value do_evaluate(const vector_constructor& vector, const evaluation_inputs& inputs) {
+    if (vector.type.get() == nullptr) {
+        on_internal_error(expr_logger,
+            "evaluate(vector_constructor) called with nullptr type, should be prepared first");
+    }
+
+    std::vector<managed_bytes> vector_elements;
+    vector_elements.reserve(vector.elements.size());
+
+    for (const expression& element : vector.elements) {
+        cql3::raw_value elem_val = evaluate(element, inputs);
+        if (elem_val.is_null()) {
+            throw exceptions::invalid_request_exception("null is not supported inside vectors");
+        }
+        vector_elements.emplace_back(std::move(elem_val).to_managed_bytes());
+    }
+
+    managed_bytes vector_bytes = vector_type_impl::build_value_fragmented(std::move(vector_elements), vector.type->value_length_if_fixed());
+    return raw_value::make_value(std::move(vector_bytes));
+}
+
 static cql3::raw_value do_evaluate(const usertype_constructor& user_val, const evaluation_inputs& inputs) {
     if (user_val.type.get() == nullptr) {
         on_internal_error(expr_logger,
@@ -1732,6 +1773,11 @@ void fill_prepare_context(expression& e, prepare_context& ctx) {
         },
         [&](collection_constructor& c) {
             for (expr::expression& element : c.elements) {
+                fill_prepare_context(element, ctx);
+            }
+        },
+        [&](vector_constructor& v) {
+            for (expr::expression& element : v.elements) {
                 fill_prepare_context(element, ctx);
             }
         },
@@ -2152,6 +2198,9 @@ aggregation_depth(const cql3::expr::expression& e) {
         [] (const collection_constructor& cc) {
             return max_over_range(cc.elements);
         },
+        [] (const vector_constructor& vc) {
+            return max_over_range(vc.elements);
+        },
         [] (const usertype_constructor& uc) {
             return max_over_range(uc.elements | std::views::values);
         }
@@ -2239,6 +2288,10 @@ levellize_aggregation_depth(const cql3::expr::expression& e, unsigned desired_de
         [&] (collection_constructor cc) -> expression {
             recurse_over_range(cc.elements);
             return cc;
+        },
+        [&] (vector_constructor vc) -> expression {
+            recurse_over_range(vc.elements);
+            return vc;
         },
         [&] (usertype_constructor uc) -> expression {
             recurse_over_range(uc.elements | std::views::values);

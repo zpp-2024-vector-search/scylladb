@@ -70,6 +70,7 @@ struct untyped_constant;
 struct constant;
 struct tuple_constructor;
 struct collection_constructor;
+struct vector_constructor;
 struct usertype_constructor;
 struct temporary;
 
@@ -89,6 +90,7 @@ concept ExpressionElement
         || std::same_as<T, constant>
         || std::same_as<T, tuple_constructor>
         || std::same_as<T, collection_constructor>
+        || std::same_as<T, vector_constructor>
         || std::same_as<T, usertype_constructor>
         || std::same_as<T, temporary>
         ;
@@ -109,6 +111,7 @@ concept invocable_on_expression
         && std::invocable<Func, constant>
         && std::invocable<Func, tuple_constructor>
         && std::invocable<Func, collection_constructor>
+        && std::invocable<Func, vector_constructor>
         && std::invocable<Func, usertype_constructor>
         && std::invocable<Func, temporary>
         ;
@@ -129,6 +132,7 @@ concept invocable_on_expression_ref
         && std::invocable<Func, constant&>
         && std::invocable<Func, tuple_constructor&>
         && std::invocable<Func, collection_constructor&>
+        && std::invocable<Func, vector_constructor&>
         && std::invocable<Func, usertype_constructor&>
         && std::invocable<Func, temporary&>
         ;
@@ -430,6 +434,19 @@ struct collection_constructor {
     friend bool operator==(const collection_constructor&, const collection_constructor&) = default;
 };
 
+// Denotes construction of a vector from its elements.
+// For example: "[1, 2, ?]"
+// During preparation vector constructors with constant values are converted to expr::constant.
+struct vector_constructor {
+    std::vector<expression> elements;
+
+    // Might be nullptr before prepare.
+    // After prepare always holds a valid type, although it might be reversed_type(vector_type).
+    data_type type;
+
+    friend bool operator==(const vector_constructor&, const vector_constructor&) = default;
+};
+
 // Constructs an object of a user-defined type
 // For example: "{field1: 23343, field2: ?}"
 // During preparation usertype constructors with constant values are converted to expr::constant.
@@ -460,8 +477,9 @@ struct expression::impl final {
     using variant_type = std::variant<
             conjunction, binary_operator, column_value, unresolved_identifier,
             column_mutation_attribute, function_call, cast, field_selection,
-            bind_variable, untyped_constant, constant, tuple_constructor, collection_constructor,
-            usertype_constructor, subscript, temporary>;
+            bind_variable, untyped_constant, constant, tuple_constructor,
+            collection_constructor, vector_constructor, usertype_constructor, 
+            subscript, temporary>;
     variant_type v;
     impl(variant_type v) : v(std::move(v)) {}
 };

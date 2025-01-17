@@ -8,6 +8,8 @@
  * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
  */
 
+#include <optional>
+#include <ranges>
 #include <seastar/core/shared_ptr.hh>
 
 #include "index/secondary_index_manager.hh"
@@ -15,6 +17,7 @@
 #include "cql3/statements/index_target.hh"
 #include "cql3/expr/expression.hh"
 #include "index/target_parser.hh"
+#include "schema/schema.hh"
 #include "schema/schema_builder.hh"
 #include "db/view/view.hh"
 #include "concrete_types.hh"
@@ -22,6 +25,8 @@
 
 #include <boost/range/adaptor/map.hpp>
 #include <boost/algorithm/string/predicate.hpp>
+#include <set>
+#include <string_view>
 
 namespace secondary_index {
 
@@ -342,6 +347,27 @@ bool secondary_index_manager::is_global_index(const schema& s) const {
     return std::ranges::any_of(_indices | std::views::values, [&s] (const index& i) {
         return !i.metadata().local() && s.cf_name() == index_table_name(i.metadata().name());
     });
+}
+
+std::optional<sstring> secondary_index_manager::custom_index_class(const schema& s) const {
+    auto range = _indices | std::views::values;
+    auto idx = std::ranges::find_if(range, [&s] (const index& i) {
+        return i.metadata().options().contains(cql3::statements::index_target::custom_index_option_name) && s.cf_name() == index_table_name(i.metadata().name());
+    });
+    if (idx == std::ranges::end(range)) {
+        return std::nullopt;
+    } else {
+        return (*idx).metadata().options().at(cql3::statements::index_target::custom_index_option_name);
+    }
+}
+
+std::set<std::string_view> secondary_index_manager::supported_custom_classes(const gms::feature_service& fs) const {
+    using namespace std::literals;
+    // TODO: when actual vector backend will be added, this will create the set from features
+    std::set<std::string_view> classes = {
+        "dummy-vector-backend"sv,
+    };
+    return classes;
 }
 
 }

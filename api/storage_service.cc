@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "storage_service.hh"
@@ -463,6 +463,22 @@ void unset_repair(http_context& ctx, routes& r) {
     ss::force_terminate_all_repair_sessions_new.unset(r);
 }
 
+static sstables_loader::stream_scope parse_stream_scope(const sstring& scope_str) {
+    using namespace ss::ns_start_restore;
+    auto sc = scope_str.empty() ? scope::all : str2scope(scope_str);
+
+    switch (sc) {
+    case scope::all: return sstables_loader::stream_scope::all;
+    case scope::dc: return sstables_loader::stream_scope::dc;
+    case scope::rack: return sstables_loader::stream_scope::rack;
+    case scope::node: return sstables_loader::stream_scope::node;
+    case scope::NUM_ITEMS:
+        break;
+    }
+
+    throw httpd::bad_param_exception("invalid scope parameter value");
+}
+
 void set_sstables_loader(http_context& ctx, routes& r, sharded<sstables_loader>& sst_loader) {
     ss::load_new_ss_tables.set(r, [&ctx, &sst_loader](std::unique_ptr<http::request> req) {
         auto ks = validate_keyspace(ctx, req);
@@ -479,7 +495,7 @@ void set_sstables_loader(http_context& ctx, routes& r, sharded<sstables_loader>&
         return sst_loader.invoke_on(coordinator,
                 [ks = std::move(ks), cf = std::move(cf),
                 load_and_stream, primary_replica_only] (sstables_loader& loader) {
-            return loader.load_new_sstables(ks, cf, load_and_stream, primary_replica_only);
+            return loader.load_new_sstables(ks, cf, load_and_stream, primary_replica_only, sstables_loader::stream_scope::all);
         }).then_wrapped([] (auto&& f) {
             if (f.failed()) {
                 auto msg = fmt::format("Failed to load new sstables: {}", f.get_exception());
@@ -495,6 +511,7 @@ void set_sstables_loader(http_context& ctx, routes& r, sharded<sstables_loader>&
         auto table = req->get_query_param("table");
         auto bucket = req->get_query_param("bucket");
         auto prefix = req->get_query_param("prefix");
+        auto scope = parse_stream_scope(req->get_query_param("scope"));
 
         // TODO: the http_server backing the API does not use content streaming
         // should use it for better performance
@@ -505,7 +522,7 @@ void set_sstables_loader(http_context& ctx, routes& r, sharded<sstables_loader>&
         auto sstables = parsed.GetArray() |
             std::views::transform([] (const auto& s) { return sstring(rjson::to_string_view(s)); }) |
             std::ranges::to<std::vector>();
-        auto task_id = co_await sst_loader.local().download_new_sstables(keyspace, table, prefix, std::move(sstables), endpoint, bucket);
+        auto task_id = co_await sst_loader.local().download_new_sstables(keyspace, table, prefix, std::move(sstables), endpoint, bucket, scope);
         co_return json::json_return_type(fmt::to_string(task_id));
     });
 
@@ -516,11 +533,11 @@ void unset_sstables_loader(http_context& ctx, routes& r) {
     ss::start_restore.unset(r);
 }
 
-void set_view_builder(http_context& ctx, routes& r, sharded<db::view::view_builder>& vb) {
-    ss::view_build_statuses.set(r, [&ctx, &vb] (std::unique_ptr<http::request> req) {
+void set_view_builder(http_context& ctx, routes& r, sharded<db::view::view_builder>& vb, sharded<gms::gossiper>& g) {
+    ss::view_build_statuses.set(r, [&ctx, &vb, &g] (std::unique_ptr<http::request> req) {
         auto keyspace = validate_keyspace(ctx, req);
         auto view = req->get_path_param("view");
-        return vb.local().view_build_statuses(std::move(keyspace), std::move(view)).then([] (std::unordered_map<sstring, sstring> status) {
+        return vb.local().view_build_statuses(std::move(keyspace), std::move(view), g.local()).then([] (std::unordered_map<sstring, sstring> status) {
             std::vector<storage_service_json::mapper> res;
             return make_ready_future<json::json_return_type>(map_to_key_value(std::move(status), res));
         });
@@ -973,13 +990,6 @@ void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_
             return make_ready_future<json::json_return_type>(json_void());
         });
     });
-    ss::truncate.set(r, [&ctx](std::unique_ptr<http::request> req) {
-        //TBD
-        unimplemented();
-        auto keyspace = validate_keyspace(ctx, req);
-        auto column_family = req->get_query_param("cf");
-        return make_ready_future<json::json_return_type>(json_void());
-    });
 
     ss::get_keyspaces.set(r, [&ctx](const_req req) {
         auto type = req.get_query_param("type");
@@ -1046,19 +1056,6 @@ void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_
         return ss.local().get_operation_mode().then([] (auto mode) {
             return make_ready_future<json::json_return_type>(mode >= service::storage_service::mode::JOINING && mode != service::storage_service::mode::MAINTENANCE);
         });
-    });
-
-    ss::set_stream_throughput_mb_per_sec.set(r, [](std::unique_ptr<http::request> req) {
-        //TBD
-        unimplemented();
-        auto value = req->get_query_param("value");
-        return make_ready_future<json::json_return_type>(json_void());
-    });
-
-    ss::get_stream_throughput_mb_per_sec.set(r, [](std::unique_ptr<http::request> req) {
-        //TBD
-        unimplemented();
-        return make_ready_future<json::json_return_type>(0);
     });
 
     ss::is_incremental_backups_enabled.set(r, [&ctx](std::unique_ptr<http::request> req) {
@@ -1616,7 +1613,6 @@ void unset_storage_service(http_context& ctx, routes& r) {
     ss::is_starting.unset(r);
     ss::get_drain_progress.unset(r);
     ss::drain.unset(r);
-    ss::truncate.unset(r);
     ss::get_keyspaces.unset(r);
     ss::stop_gossiping.unset(r);
     ss::start_gossiping.unset(r);
@@ -1625,8 +1621,6 @@ void unset_storage_service(http_context& ctx, routes& r) {
     ss::is_initialized.unset(r);
     ss::join_ring.unset(r);
     ss::is_joined.unset(r);
-    ss::set_stream_throughput_mb_per_sec.unset(r);
-    ss::get_stream_throughput_mb_per_sec.unset(r);
     ss::is_incremental_backups_enabled.unset(r);
     ss::set_incremental_backups_enabled.unset(r);
     ss::rebuild.unset(r);

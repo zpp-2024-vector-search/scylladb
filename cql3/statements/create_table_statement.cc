@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 
@@ -185,8 +185,17 @@ std::unique_ptr<prepared_statement> create_table_statement::raw_statement::prepa
     if (_properties.properties()->get_synchronous_updates_flag()) {
         throw exceptions::invalid_request_exception(format("The synchronous_updates option is only applicable to materialized views, not to base tables"));
     }
+    std::vector<sstring> stmt_warnings;
+    auto stmt_warning = [&] (sstring msg) {
+        if (this_shard_id() == 0) {
+            mylogger.warn("{}: {}", cf_name, msg);
+        }
+        stmt_warnings.emplace_back(std::move(msg));
+    };
     std::optional<sstring> warning = check_restricted_table_properties(db, std::nullopt, keyspace(), column_family(), *_properties.properties());
     if (warning) {
+        // FIXME: should this warning be returned to the caller?
+        // See https://github.com/scylladb/scylladb/issues/20945
         mylogger.warn("{}", *warning);
     }
     const bool has_default_ttl = _properties.properties()->get_default_time_to_live() > 0;
@@ -240,6 +249,12 @@ std::unique_ptr<prepared_statement> create_table_statement::raw_statement::prepa
     }
 
     stmt->_use_compact_storage = _properties.use_compact_storage();
+    if (stmt->_use_compact_storage) {
+        if (!db.get_config().enable_create_table_with_compact_storage()) {
+            throw exceptions::invalid_request_exception("Support for the deprecated feature of 'CREATE TABLE WITH COMPACT STORAGE' is disabled and will eventually be removed in a future version.  To enable, set the 'enable_create_table_with_compact_storage' config option to 'true'.");
+        }
+        stmt_warning("CREATE TABLE WITH COMPACT STORAGE is deprecated and will eventually be removed in a future version.");
+    }
 
     auto& key_aliases = _key_aliases[0];
     std::vector<data_type> key_types;
@@ -390,7 +405,7 @@ std::unique_ptr<prepared_statement> create_table_statement::raw_statement::prepa
         }
     }
 
-    return std::make_unique<prepared_statement>(stmt);
+    return std::make_unique<prepared_statement>(audit_info(), stmt, std::move(stmt_warnings));
 }
 
 data_type create_table_statement::raw_statement::get_type_and_remove(column_map_type& columns, ::shared_ptr<column_identifier> t)
@@ -464,6 +479,9 @@ std::optional<sstring> check_restricted_table_properties(
     // Evaluate whether the strategy to evaluate was explicitly passed
     auto cs = (strategy) ? strategy : current_strategy;
 
+    if (cs == sstables::compaction_strategy_type::in_memory) {
+        throw exceptions::configuration_exception(format("{} has been deprecated.", sstables::compaction_strategy::name(*cs)));
+    }
     if (cs == sstables::compaction_strategy_type::time_window) {
         std::map<sstring, sstring> options = (strategy) ? cfprops.get_compaction_type_options() : (*schema)->compaction_strategy_options();
         sstables::time_window_compaction_strategy_options twcs_options(options);
@@ -513,6 +531,10 @@ std::optional<sstring> check_restricted_table_properties(
             event_t::target_type::TABLE,
             keyspace(),
             column_family());
+}
+
+audit::statement_category create_table_statement::raw_statement::category() const {
+    return audit::statement_category::DDL;
 }
 
 }

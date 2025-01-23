@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 
@@ -19,7 +19,8 @@
 
 #include <fmt/ranges.h>
 
-#include "test/lib/scylla_test_case.hh"
+#undef SEASTAR_TESTING_MAIN
+#include <seastar/testing/test_case.hh>
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/future-util.hh>
 #include <seastar/core/do_with.hh>
@@ -46,6 +47,8 @@
 #include "test/lib/mutation_source_test.hh"
 #include "test/lib/key_utils.hh"
 #include "test/lib/test_utils.hh"
+
+BOOST_AUTO_TEST_SUITE(commitlog_test)
 
 using namespace db;
 
@@ -306,6 +309,7 @@ SEASTAR_TEST_CASE(test_commitlog_delete_when_over_disk_limit) {
     cfg.commitlog_segment_size_in_mb = max_size_mb;
     cfg.commitlog_total_space_in_mb = 1;
     cfg.commitlog_sync_period_in_ms = 1;
+    cfg.allow_going_over_size_limit = true;
     return cl_test(cfg, [](commitlog& log) {
             auto sem = make_lw_shared<semaphore>(0);
             auto segments = make_lw_shared<std::set<sstring>>();
@@ -2056,3 +2060,5 @@ SEASTAR_TEST_CASE(test_commitlog_buffer_size_counter) {
     co_await log.shutdown();
     co_await log.clear();
 }
+
+BOOST_AUTO_TEST_SUITE_END()

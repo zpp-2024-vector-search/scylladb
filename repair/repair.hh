@@ -3,24 +3,18 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 
-#include <boost/range/adaptor/map.hpp>
-
 #include <unordered_map>
 #include <exception>
-#include <absl/container/btree_set.h>
 #include <fmt/core.h>
 
-#include <seastar/core/abort_source.hh>
 #include <seastar/core/sstring.hh>
 #include <seastar/core/sharded.hh>
 #include <seastar/core/future.hh>
-#include <seastar/core/condition-variable.hh>
-#include <seastar/core/gate.hh>
 
 #include "gms/inet_address.hh"
 #include "locator/abstract_replication_strategy.hh"
@@ -31,7 +25,6 @@
 #include "utils/stall_free.hh"
 #include "repair/sync_boundary.hh"
 #include "tasks/types.hh"
-#include "schema/schema.hh"
 #include "gms/gossip_address_map.hh"
 
 namespace tasks {
@@ -149,9 +142,6 @@ public:
     repair_neighbors() = default;
     explicit repair_neighbors(std::vector<locator::host_id> a)
         : all(std::move(a)) {
-    }
-    explicit repair_neighbors(const std::unordered_map<locator::host_id, gms::inet_address>& a)
-        : all(a | std::views::keys | std::ranges::to<std::vector<locator::host_id>>()) {
     }
     repair_neighbors(std::vector<locator::host_id> a, std::vector<locator::host_id> m)
         : all(std::move(a))

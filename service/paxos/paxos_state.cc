@@ -5,12 +5,12 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 #include <exception>
 #include <seastar/core/coroutine.hh>
 #include <seastar/coroutine/all.hh>
-#include "seastar/coroutine/exception.hh"
+#include <seastar/coroutine/exception.hh>
 #include "service/storage_proxy.hh"
 #include "service/paxos/proposal.hh"
 #include "service/paxos/paxos_state.hh"

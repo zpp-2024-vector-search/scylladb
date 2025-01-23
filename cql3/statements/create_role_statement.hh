@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #pragma once
@@ -43,6 +43,8 @@ public:
 
     virtual future<::shared_ptr<cql_transport::messages::result_message>>
     execute(query_processor&, service::query_state&, const query_options&, std::optional<service::group0_guard> guard) const override;
+
+    virtual void sanitize_audit_info() override;
 
 private:
     future<> grant_permissions_to_creator(const service::client_state&, ::service::group0_batch&) const;

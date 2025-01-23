@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 #include <seastar/core/metrics.hh>
 #include "types/types.hh"
@@ -212,7 +212,7 @@ trace_keyspace_helper::trace_keyspace_helper(tracing& tr)
 future<> trace_keyspace_helper::start(cql3::query_processor& qp, service::migration_manager& mm) {
     _qp_anchor = &qp;
     _mm_anchor = &mm;
-    return table_helper::setup_keyspace(qp, mm, KEYSPACE_NAME, "2", _dummy_query_state, { &_sessions, &_sessions_time_idx, &_events, &_slow_query_log, &_slow_query_log_time_idx });
+    return table_helper::setup_keyspace(qp, mm, KEYSPACE_NAME, "org.apache.cassandra.locator.SimpleStrategy", "2", _dummy_query_state, { &_sessions, &_sessions_time_idx, &_events, &_slow_query_log, &_slow_query_log_time_idx });
 }
 
 gms::inet_address trace_keyspace_helper::my_address() const noexcept {
@@ -380,7 +380,7 @@ std::vector<cql3::raw_value> trace_keyspace_helper::make_event_mutation_data(gms
         cql3::raw_value::make_value(utf8_type->decompose(record.message)),
         cql3::raw_value::make_value(inet_addr_type->decompose(my_address.addr())),
         cql3::raw_value::make_value(int32_type->decompose(elapsed_to_micros(record.elapsed))),
-        cql3::raw_value::make_value(utf8_type->decompose(_local_tracing.get_thread_name())),
+        cql3::raw_value::make_value(utf8_type->decompose(fmt::format("{}/{}", _local_tracing.get_thread_name(), record.scheduling_group_name))),
         cql3::raw_value::make_value(long_type->decompose(int64_t(session_records.parent_id.get_id()))),
         cql3::raw_value::make_value(long_type->decompose(int64_t(session_records.my_span_id.get_id()))),
         cql3::raw_value::make_value(int32_type->decompose((int32_t)(session_records.ttl.count())))

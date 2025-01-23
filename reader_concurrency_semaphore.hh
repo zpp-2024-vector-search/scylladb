@@ -1,5 +1,5 @@
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 /*
@@ -124,6 +124,8 @@ public:
         uint64_t sstables_read = 0;
         // Permits waiting on something: admission, memory or execution
         uint64_t waiters = 0;
+
+        friend auto operator<=>(const stats&, const stats&) = default;
     };
 
     using permit_list_type = bi::list<
@@ -230,6 +232,8 @@ private:
     bool should_evict_inactive_read() const noexcept;
 
     void maybe_admit_waiters() noexcept;
+
+    void maybe_wake_execution_loop() noexcept;
 
     // Request more memory for the permit.
     // Request is instantly granted while memory consumption of all reads is

@@ -2,7 +2,7 @@
 #
 # Copyright (C) 2022-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 """Minio server for testing.
    Provides helpers to setup and manage minio server for testing.
@@ -222,7 +222,7 @@ class MinioServer:
 
     async def start(self):
         if self.srv_exe is None:
-            self.logger.info("Minio not installed, get it from https://dl.minio.io/server/minio/release/linux-amd64/minio and put into PATH")
+            self.logger.error("Minio not installed, get it from https://dl.minio.io/server/minio/release/linux-amd64/minio and put into PATH")
             return
 
         self.log_file = self.log_filename.open("wb")
@@ -238,7 +238,7 @@ class MinioServer:
             else:
                 break
         else:
-            self.logger.info("Failed to start Minio server")
+            self.logger.error("Failed to start Minio server")
             return
 
         self.create_conf_file(self.address, self.port, self.access_key, self.secret_key, self.DEFAULT_REGION, self.config_file)
@@ -261,7 +261,7 @@ class MinioServer:
             await self.mc('admin', 'policy', 'attach', alias, 'test-policy', '--user', self.access_key)
 
         except Exception as e:
-            self.logger.info(f'MC failed: {e}')
+            self.logger.error(f'MC failed: {e}')
             await self.stop()
 
     async def stop(self):

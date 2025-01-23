@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -14,6 +14,7 @@
 #include <seastar/core/sstring.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/execution_stage.hh>
+#include <seastar/core/when_all.hh>
 #include "utils/assert.hh"
 #include "utils/hash.hh"
 #include "db_clock.hh"
@@ -47,7 +48,7 @@
 #include "utils/phased_barrier.hh"
 #include "backlog_controller.hh"
 #include "dirty_memory_manager.hh"
-#include "reader_concurrency_semaphore.hh"
+#include "reader_concurrency_semaphore_group.hh"
 #include "db/timeout_clock.hh"
 #include "querier.hh"
 #include "cache_temperature.hh"
@@ -67,6 +68,7 @@
 #include "utils/serialized_action.hh"
 #include "compaction/compaction_fwd.hh"
 #include "compaction_group.hh"
+#include "service/qos/qos_configuration_change_subscriber.hh"
 
 class cell_locker;
 class cell_locker_stats;
@@ -137,11 +139,15 @@ class view_update_generator;
 
 }
 
+namespace qos {
+    class service_level_controller;
+}
+
 class mutation_reordered_with_truncate_exception : public std::exception {};
 
 class column_family_test;
 class table_for_tests;
-class database_test;
+class database_test_wrapper;
 using sstable_list = sstables::sstable_list;
 
 class sigquit_handler;
@@ -581,7 +587,7 @@ public:
     // Precondition: table needs tablet splitting.
     // Returns true if all storage of table is ready for splitting.
     bool all_storage_groups_split();
-    future<> split_all_storage_groups();
+    future<> split_all_storage_groups(tasks::task_info tablet_split_task_info);
 
     // Splits compaction group of a single tablet, if and only if the underlying table has
     // split request emitted by coordinator (found in tablet metadata).
@@ -602,19 +608,19 @@ private:
     future<> handle_tablet_split_completion(size_t old_tablet_count, const locator::tablet_map& new_tmap);
 
     // Select a storage group from a given token.
-    storage_group& storage_group_for_token(dht::token token) const noexcept;
+    storage_group& storage_group_for_token(dht::token token) const;
     storage_group& storage_group_for_id(size_t i) const;
 
     std::unique_ptr<storage_group_manager> make_storage_group_manager();
-    compaction_group* get_compaction_group(size_t id) const noexcept;
+    compaction_group* get_compaction_group(size_t id) const;
     // Select a compaction group from a given token.
-    compaction_group& compaction_group_for_token(dht::token token) const noexcept;
+    compaction_group& compaction_group_for_token(dht::token token) const;
     // Return compaction groups, present in this shard, that own a particular token range.
     utils::chunked_vector<compaction_group*> compaction_groups_for_token_range(dht::token_range tr) const;
     // Select a compaction group from a given key.
-    compaction_group& compaction_group_for_key(partition_key_view key, const schema_ptr& s) const noexcept;
+    compaction_group& compaction_group_for_key(partition_key_view key, const schema_ptr& s) const;
     // Select a compaction group from a given sstable based on its token range.
-    compaction_group& compaction_group_for_sstable(const sstables::shared_sstable& sst) const noexcept;
+    compaction_group& compaction_group_for_sstable(const sstables::shared_sstable& sst) const;
     // Safely iterate through compaction groups, while performing async operations on them.
     future<> parallel_foreach_compaction_group(std::function<future<>(compaction_group&)> action);
     void for_each_compaction_group(std::function<void(compaction_group&)> action);
@@ -862,7 +868,7 @@ public:
     void set_schema(schema_ptr);
     db::commitlog* commitlog() const;
     const locator::effective_replication_map_ptr& get_effective_replication_map() const { return _erm; }
-    future<> update_effective_replication_map(locator::effective_replication_map_ptr);
+    void update_effective_replication_map(locator::effective_replication_map_ptr);
     [[gnu::always_inline]] bool uses_tablets() const;
 private:
     future<> clear_inactive_reads_for_tablet(database& db, storage_group& sg);
@@ -1383,8 +1389,8 @@ class db_user_types_storage;
 //   local metadata reads
 //   use table::shard_for_reads()/table::shard_for_writes() for data
 
-class database : public peering_sharded_service<database> {
-    friend class ::database_test;
+class database : public peering_sharded_service<database>, qos::qos_configuration_change_subscriber {
+    friend class ::database_test_wrapper;
 public:
     enum class table_kind {
         system,
@@ -1487,13 +1493,13 @@ private:
     flush_controller _memtable_controller;
     drain_progress _drain_progress {};
 
-    reader_concurrency_semaphore _read_concurrency_sem;
+
     reader_concurrency_semaphore _streaming_concurrency_sem;
     reader_concurrency_semaphore _compaction_concurrency_sem;
     reader_concurrency_semaphore _system_read_concurrency_sem;
 
-    // The view update read concurrency semaphore used for view updates coming from user writes.
-    reader_concurrency_semaphore _view_update_read_concurrency_sem;
+    // The view update read concurrency semaphores used for view updates coming from user writes.
+    reader_concurrency_semaphore_group _view_update_read_concurrency_semaphores_group;
     db::timeout_semaphore _view_update_concurrency_sem{max_memory_pending_view_updates()};
 
     cache_tracker _row_cache_tracker;
@@ -1540,6 +1546,10 @@ private:
     const locator::shared_token_metadata& _shared_token_metadata;
     lang::manager& _lang_manager;
 
+    reader_concurrency_semaphore_group _reader_concurrency_semaphores_group;
+    scheduling_group _default_read_concurrency_group;
+    noncopyable_function<future<>()> _unsubscribe_qos_configuration_change;
+
     utils::cross_shard_barrier _stop_barrier;
 
     db::rate_limiter _rate_limiter;
@@ -1579,6 +1589,10 @@ private:
     future<> create_in_memory_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm, locator::effective_replication_map_factory& erm_factory, system_keyspace system);
     void setup_metrics();
     void setup_scylla_memory_diagnostics_producer();
+    reader_concurrency_semaphore& read_concurrency_sem();
+    reader_concurrency_semaphore& view_update_read_concurrency_sem();
+    auto sum_read_concurrency_sem_var(std::invocable<reader_concurrency_semaphore&> auto member);
+    auto sum_read_concurrency_sem_stat(std::invocable<reader_concurrency_semaphore::stats&> auto stats_member);
 
     future<> do_apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog_force_sync sync, db::per_partition_rate_limit::info rate_limit_info);
     future<> do_apply_many(const std::vector<frozen_mutation>&, db::timeout_clock::time_point timeout);
@@ -1714,7 +1728,7 @@ public:
     /// reads, to speed up startup. After startup this should be reverted to
     /// the normal concurrency.
     void revert_initial_system_read_concurrency_boost();
-    future<> start();
+    future<> start(sharded<qos::service_level_controller>&);
     future<> shutdown();
     future<> stop();
     future<> close_tables(table_kind kind_to_close);
@@ -1906,6 +1920,14 @@ public:
     }
 
     future<> clear_inactive_reads_for_tablet(table_id table, dht::token_range tablet_range);
+
+    /** This callback is going to be called just before the service level is available **/
+    virtual future<> on_before_service_level_add(qos::service_level_options slo, qos::service_level_info sl_info) override;
+    /** This callback is going to be called just after the service level is removed **/
+    virtual future<> on_after_service_level_remove(qos::service_level_info sl_info) override;
+    /** This callback is going to be called just before the service level is changed **/
+    virtual future<> on_before_service_level_change(qos::service_level_options slo_before, qos::service_level_options slo_after, qos::service_level_info sl_info) override;
+    virtual future<> on_effective_service_levels_cache_reloaded() override;
 };
 
 // A helper function to parse the directory name back

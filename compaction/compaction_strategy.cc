@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 /*
@@ -21,8 +21,6 @@
 #include "compaction_strategy_state.hh"
 #include "cql3/statements/property_definitions.hh"
 #include "schema/schema.hh"
-#include <boost/range/algorithm/find.hpp>
-#include <boost/range/numeric.hpp>
 #include "size_tiered_compaction_strategy.hh"
 #include "leveled_compaction_strategy.hh"
 #include "time_window_compaction_strategy.hh"
@@ -31,8 +29,11 @@
 #include "size_tiered_backlog_tracker.hh"
 #include "leveled_manifest.hh"
 #include "utils/to_string.hh"
+#include "incremental_compaction_strategy.hh"
+#include "sstables/sstable_set_impl.hh"
 
 logging::logger leveled_manifest::logger("LeveledManifest");
+logging::logger compaction_strategy_logger("CompactionStrategy");
 
 using namespace sstables;
 
@@ -174,8 +175,14 @@ void compaction_strategy_impl::validate_options_for_strategy_type(const std::map
         case compaction_strategy_type::time_window:
             time_window_compaction_strategy::validate_options(options, unchecked_options);
             break;
+        case compaction_strategy_type::incremental:
+            incremental_compaction_strategy::validate_options(options, unchecked_options);
+            break;
         default:
             break;
+        case compaction_strategy_type::null:
+        case compaction_strategy_type::in_memory:
+            return;
     }
 
     unchecked_options.erase("class");
@@ -303,7 +310,7 @@ void size_tiered_backlog_tracker::replace_sstables(const std::vector<sstables::s
             }
         }
     }
-    auto tmp_contrib = calculate_sstables_backlog_contribution(boost::copy_range<std::vector<shared_sstable>>(tmp_all), _stcs_options);
+    auto tmp_contrib = calculate_sstables_backlog_contribution(tmp_all | std::ranges::to<std::vector>(), _stcs_options);
 
     std::invoke([&] () noexcept {
         _all = std::move(tmp_all);
@@ -758,6 +765,16 @@ compaction_strategy make_compaction_strategy(compaction_strategy_type strategy, 
     case compaction_strategy_type::time_window:
         impl = ::make_shared<time_window_compaction_strategy>(options);
         break;
+    case compaction_strategy_type::in_memory:
+        compaction_strategy_logger.warn(
+                "{} is no longer supported. Defaulting to {}.",
+                compaction_strategy::name(compaction_strategy_type::in_memory),
+                compaction_strategy::name(compaction_strategy_type::null));
+        impl = ::make_shared<null_compaction_strategy>();
+        break;
+    case compaction_strategy_type::incremental:
+        impl = make_shared<incremental_compaction_strategy>(incremental_compaction_strategy(options));
+        break;
     default:
         throw std::runtime_error("strategy not supported");
     }
@@ -772,6 +789,10 @@ future<reshape_config> make_reshape_config(const sstables::storage& storage, res
     };
 }
 
+std::unique_ptr<sstable_set_impl> incremental_compaction_strategy::make_sstable_set(schema_ptr schema) const {
+    return std::make_unique<partitioned_sstable_set>(std::move(schema), false);
+}
+
 }
 
 namespace compaction {
@@ -780,6 +801,7 @@ compaction_strategy_state compaction_strategy_state::make(const compaction_strat
     switch (cs.type()) {
         case compaction_strategy_type::null:
         case compaction_strategy_type::size_tiered:
+        case compaction_strategy_type::incremental:
             return compaction_strategy_state(default_empty_state{});
         case compaction_strategy_type::leveled:
             return compaction_strategy_state(leveled_compaction_strategy_state{});

@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "api.hh"
@@ -36,6 +36,7 @@
 #include "tasks.hh"
 #include "raft.hh"
 #include "gms/gossip_address_map.hh"
+#include "service_levels.hh"
 
 logging::logger apilog("api");
 
@@ -80,7 +81,7 @@ future<> set_server_init(http_context& ctx) {
     });
 }
 
-future<> set_server_config(http_context& ctx, const db::config& cfg) {
+future<> set_server_config(http_context& ctx, db::config& cfg) {
     auto rb02 = std::make_shared < api_registry_builder20 > (ctx.api_doc, "/v2");
     return ctx.http_server.set_routes([&ctx, &cfg, rb02](routes& r) {
         set_config(rb02, ctx, r, cfg, false);
@@ -152,8 +153,8 @@ future<> unset_server_sstables_loader(http_context& ctx) {
     return ctx.http_server.set_routes([&ctx] (routes& r) { unset_sstables_loader(ctx, r); });
 }
 
-future<> set_server_view_builder(http_context& ctx, sharded<db::view::view_builder>& vb) {
-    return ctx.http_server.set_routes([&ctx, &vb] (routes& r) { set_view_builder(ctx, r, vb); });
+future<> set_server_view_builder(http_context& ctx, sharded<db::view::view_builder>& vb, sharded<gms::gossiper>& g) {
+    return ctx.http_server.set_routes([&ctx, &vb, &g] (routes& r) { set_view_builder(ctx, r, vb, g); });
 }
 
 future<> unset_server_view_builder(http_context& ctx) {
@@ -187,8 +188,8 @@ future<> unset_server_snapshot(http_context& ctx) {
     return ctx.http_server.set_routes([&ctx] (routes& r) { unset_snapshot(ctx, r); });
 }
 
-future<> set_server_token_metadata(http_context& ctx, sharded<locator::shared_token_metadata>& tm) {
-    return ctx.http_server.set_routes([&ctx, &tm] (routes& r) { set_token_metadata(ctx, r, tm); });
+future<> set_server_token_metadata(http_context& ctx, sharded<locator::shared_token_metadata>& tm, sharded<gms::gossiper>& g) {
+    return ctx.http_server.set_routes([&ctx, &tm, &g] (routes& r) { set_token_metadata(ctx, r, tm, g); });
 }
 
 future<> unset_server_token_metadata(http_context& ctx) {
@@ -272,10 +273,10 @@ future<> unset_server_cache(http_context& ctx) {
     return ctx.http_server.set_routes([&ctx] (routes& r) { unset_cache_service(ctx, r); });
 }
 
-future<> set_hinted_handoff(http_context& ctx, sharded<service::storage_proxy>& proxy) {
+future<> set_hinted_handoff(http_context& ctx, sharded<service::storage_proxy>& proxy, sharded<gms::gossiper>& g) {
     return register_api(ctx, "hinted_handoff",
-                "The hinted handoff API", [&proxy] (http_context& ctx, routes& r) {
-                    set_hinted_handoff(ctx, r, proxy);
+                "The hinted handoff API", [&proxy, &g] (http_context& ctx, routes& r) {
+                    set_hinted_handoff(ctx, r, proxy, g);
                 });
 }
 
@@ -357,6 +358,12 @@ future<> unset_server_cql_server_test(http_context& ctx) {
 }
 
 #endif
+
+future<> set_server_service_levels(http_context &ctx, cql_transport::controller& ctl, sharded<cql3::query_processor>& qp) {
+    return register_api(ctx, "service_levels", "The service levels API", [&ctl, &qp] (http_context& ctx, routes& r) {
+        set_service_levels(ctx, r, ctl, qp);
+    });
+}
 
 future<> set_server_tasks_compaction_module(http_context& ctx, sharded<service::storage_service>& ss, sharded<db::snapshot_ctl>& snap_ctl) {
     auto rb = std::make_shared < api_registry_builder > (ctx.api_doc);

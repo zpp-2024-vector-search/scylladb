@@ -3,12 +3,13 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "i_partitioner.hh"
 #include "sharder.hh"
 #include "auto_refreshing_sharder.hh"
+#include <seastar/core/loop.hh>
 #include <seastar/core/seastar.hh>
 #include <seastar/coroutine/maybe_yield.hh>
 #include "dht/ring_position.hh"

@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -66,6 +66,10 @@ public:
 
     void remove_sst_from_reclaimed(sstable* sst) {
         _reclaimed.erase(*sst);
+    }
+
+    auto& get_active_list() {
+        return _active;
     }
 
     auto& get_reclaimed_set() {

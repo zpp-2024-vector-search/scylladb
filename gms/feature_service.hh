@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -135,6 +135,7 @@ public:
     gms::feature native_reverse_queries { *this, "NATIVE_REVERSE_QUERIES"sv };
     gms::feature zero_token_nodes { *this, "ZERO_TOKEN_NODES"sv };
     gms::feature view_build_status_on_group0 { *this, "VIEW_BUILD_STATUS_ON_GROUP0"sv };
+    gms::feature views_with_tablets { *this, "VIEWS_WITH_TABLETS"sv };
 
     // Whether to allow fragmented commitlog entries. While this is a node-local feature as such, hide
     // behind a feature to ensure an upgrading cluster appears to be at least functional before using,
@@ -149,6 +150,7 @@ public:
     gms::feature tablet_merge { *this, "TABLET_MERGE"sv };
 
     gms::feature tablet_migration_virtual_task { *this, "TABLET_MIGRATION_VIRTUAL_TASK"sv };
+    gms::feature tablet_resize_virtual_task { *this, "TABLET_RESIZE_VIRTUAL_TASK"sv };
 
     // A feature just for use in tests. It must not be advertised unless
     // the "features_enable_test_feature" injection is enabled.
@@ -156,6 +158,9 @@ public:
     gms::feature test_only_feature { *this, "TEST_ONLY_FEATURE"sv };
     gms::feature address_nodes_by_host_ids { *this, "ADDRESS_NODES_BY_HOST_IDS"sv };
 
+    gms::feature in_memory_tables { *this, "IN_MEMORY_TABLES"sv };
+    gms::feature workload_prioritization { *this, "WORKLOAD_PRIORITIZATION"sv };
+    gms::feature compression_dicts { *this, "COMPRESSION_DICTS"sv };
 public:
 
     const std::unordered_map<sstring, std::reference_wrapper<feature>>& registered_features() const;

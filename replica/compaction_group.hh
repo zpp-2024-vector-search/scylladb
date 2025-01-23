@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <seastar/core/condition-variable.hh>
@@ -264,7 +264,7 @@ public:
     //  1) Flushes all memtables which were created in non-split mode, and waits for that to complete.
     //  2) Compacts all sstables which overlap with the split point
     // Returns a future which resolves when this process is complete.
-    future<> split(sstables::compaction_type_options::split opt);
+    future<> split(sstables::compaction_type_options::split opt, tasks::task_info tablet_split_task_info);
 
     // Make an sstable set spanning all sstables in the storage_group
     lw_shared_ptr<const sstables::sstable_set> make_sstable_set() const;
@@ -356,19 +356,19 @@ public:
     // refresh_mutation_source must be called when there are changes to data source
     // structures but logical state of data is not changed (e.g. when state for a
     // new tablet replica is allocated).
-    virtual future<> update_effective_replication_map(const locator::effective_replication_map& erm, noncopyable_function<void()> refresh_mutation_source) = 0;
+    virtual void update_effective_replication_map(const locator::effective_replication_map& erm, noncopyable_function<void()> refresh_mutation_source) = 0;
 
-    virtual compaction_group& compaction_group_for_token(dht::token token) const noexcept = 0;
+    virtual compaction_group& compaction_group_for_token(dht::token token) const = 0;
     virtual utils::chunked_vector<compaction_group*> compaction_groups_for_token_range(dht::token_range tr) const = 0;
-    virtual compaction_group& compaction_group_for_key(partition_key_view key, const schema_ptr& s) const noexcept = 0;
-    virtual compaction_group& compaction_group_for_sstable(const sstables::shared_sstable& sst) const noexcept = 0;
+    virtual compaction_group& compaction_group_for_key(partition_key_view key, const schema_ptr& s) const = 0;
+    virtual compaction_group& compaction_group_for_sstable(const sstables::shared_sstable& sst) const = 0;
 
     virtual size_t log2_storage_groups() const = 0;
-    virtual storage_group& storage_group_for_token(dht::token) const noexcept = 0;
+    virtual storage_group& storage_group_for_token(dht::token) const = 0;
 
     virtual locator::table_load_stats table_load_stats(std::function<bool(const locator::tablet_map&, locator::global_tablet_id)> tablet_filter) const noexcept = 0;
     virtual bool all_storage_groups_split() = 0;
-    virtual future<> split_all_storage_groups() = 0;
+    virtual future<> split_all_storage_groups(tasks::task_info tablet_split_task_info) = 0;
     virtual future<> maybe_split_compaction_group_of(size_t idx) = 0;
     virtual future<std::vector<sstables::shared_sstable>> maybe_split_sstable(const sstables::shared_sstable& sst) = 0;
     virtual dht::token_range get_token_range_after_split(const dht::token&) const noexcept = 0;

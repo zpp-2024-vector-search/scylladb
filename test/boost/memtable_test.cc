@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <boost/test/unit_test.hpp>
@@ -12,7 +12,8 @@
 #include "db/config.hh"
 #include "utils/assert.hh"
 #include "utils/UUID_gen.hh"
-#include "test/lib/scylla_test_case.hh"
+#undef SEASTAR_TESTING_MAIN
+#include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
 #include "schema/schema_builder.hh"
 #include <seastar/util/closeable.hh>
@@ -41,6 +42,8 @@
 #include "db/extensions.hh"
 #include "db/config.hh"
 #include "service/storage_service.hh"
+
+BOOST_AUTO_TEST_SUITE(memtable_test)
 
 using namespace std::literals::chrono_literals;
 
@@ -1032,9 +1035,11 @@ SEASTAR_TEST_CASE(memtable_flush_period) {
         schema_ptr s2 = b.build();
         t.set_schema(s2);
 
-        sleep(500ms).get(); // wait until memtable will be flushed at least once
-
-        BOOST_REQUIRE_EQUAL(t.sstables_count(), 1); // check sstable exists after flush
+        sleep(500ms).get(); // wait until memtable flush starts at least once
+        BOOST_REQUIRE(t.sstables_count() == 1 || t.get_stats().pending_flushes > 0);    // flush started
+        BOOST_REQUIRE(eventually_true([&] { // wait until memtable will be flushed at least once
+            return t.sstables_count() == 1;
+        }));
 
         // Check mutation presents in the table
         mutation_source ms = t.as_mutation_source();
@@ -1481,3 +1486,5 @@ SEASTAR_TEST_CASE(test_ext_config_exceptions_in_flush_on_sstable_open) {
         [] { throw db::extension_storage_misconfigured(get_name()); }
     );
 }
+
+BOOST_AUTO_TEST_SUITE_END()

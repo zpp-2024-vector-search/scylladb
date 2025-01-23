@@ -4,7 +4,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <chrono>
@@ -27,6 +27,7 @@
 #include "locator/token_metadata.hh"
 #include "db/schema_tables.hh"
 #include "idl/gossip.dist.hh"
+#include "service/qos/service_level_controller.hh"
 
 using namespace std::chrono_literals;
 using namespace netw;
@@ -181,9 +182,12 @@ int main(int ac, char ** av) {
         ("cpuid", bpo::value<uint32_t>()->default_value(0), "Server cpuid");
 
     distributed<replica::database> db;
+    sharded<auth::service> auth_service;
+    locator::shared_token_metadata tm({}, {});
+    distributed<qos::service_level_controller> sl_controller;
 
-    return app.run_deprecated(ac, av, [&app] {
-        return seastar::async([&app] {
+    return app.run_deprecated(ac, av, [&app, &auth_service, &tm, &sl_controller] {
+        return seastar::async([&app, &auth_service, &tm, &sl_controller] {
             auto config = app.configuration();
             bool stay_alive = config["stay-alive"].as<bool>();
             const gms::inet_address listen = gms::inet_address(config["listen-address"].as<std::string>());
@@ -193,13 +197,23 @@ int main(int ac, char ** av) {
             sharded<locator::shared_token_metadata> token_metadata;
             token_metadata.start([] () noexcept { return db::schema_tables::hold_merge_lock(); }, tm_cfg).get();
             auto stop_tm = deferred_stop(token_metadata);
+            auto default_scheduling_group = create_scheduling_group("sl_default_sg", 1.0).get();
+            sharded<abort_source> as;
+            as.start().get();
+            auto stop_as = defer([&as] { as.stop().get(); });
+            sl_controller.start(std::ref(auth_service), std::ref(tm), std::ref(as), qos::service_level_options{.shares = 1000}, default_scheduling_group).get();
+            seastar::sharded<utils::walltime_compressor_tracker> compressor_tracker;
+            compressor_tracker.start([] { return utils::walltime_compressor_tracker::config{}; }).get();
+            auto stop_compressor_tracker = deferred_stop(compressor_tracker);
             seastar::sharded<gms::feature_service> feature_service;
             auto cfg = gms::feature_config_from_db_config(db::config(), {});
             feature_service.start(cfg).get();
             seastar::sharded<gms::gossip_address_map> gossip_address_map;
             gossip_address_map.start().get();
             seastar::sharded<netw::messaging_service> messaging;
-            messaging.start(locator::host_id{}, listen, 7000, std::ref(feature_service), std::ref(gossip_address_map)).get();
+            messaging.start(locator::host_id{}, listen, 7000, std::ref(feature_service),
+                            std::ref(gossip_address_map), std::ref(compressor_tracker),
+                            std::ref(sl_controller)).get();
             auto stop_messaging = deferred_stop(messaging);
             seastar::sharded<tester> testers;
             testers.start(std::ref(messaging)).get();
@@ -210,7 +224,7 @@ int main(int ac, char ** av) {
             auto deinit_testers = deferred_action([&testers] {
                 testers.invoke_on_all(&tester::deinit_handler).get();
             });
-            messaging.invoke_on_all(&netw::messaging_service::start_listen, std::ref(token_metadata)).get();
+            messaging.invoke_on_all(&netw::messaging_service::start_listen, std::ref(token_metadata), [] (gms::inet_address ip){ return locator::host_id{}; }).get();
             if (config.contains("server")) {
                 auto ip = config["server"].as<std::string>();
                 auto cpuid = config["cpuid"].as<uint32_t>();

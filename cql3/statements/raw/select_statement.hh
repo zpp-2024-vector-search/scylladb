@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #pragma once
@@ -76,6 +76,8 @@ public:
 
     using result_row_type = std::vector<managed_bytes_opt>;
     using ordering_comparator_type = compare_fn<result_row_type>;
+protected:
+    virtual audit::statement_category category() const override;
 private:
     using prepared_orderings_type = std::vector<std::pair<const column_definition*, ordering>>;
 private:

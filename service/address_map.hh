@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 #pragma once
 
@@ -296,6 +296,15 @@ public:
             entry._lru_entry->touch();
         }
         return entry._addr;
+    }
+
+    // Same as find() above but expects mapping to exist
+    gms::inet_address get(locator::host_id id) const {
+        try {
+            return find(id).value();
+        } catch (std::bad_optional_access& err) {
+            on_internal_error(rslog, fmt::format("No ip address for {} when one is expected", id));
+        }
     }
 
     // Find an id with a given mapping.

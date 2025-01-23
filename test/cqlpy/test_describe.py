@@ -1,7 +1,7 @@
 
 # Copyright 2022-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 
 ###############################################################################
 # Tests for server-side describe
@@ -1510,19 +1510,28 @@ class AuthSLContext:
                 self.cql.execute(f"DROP SERVICE LEVEL {make_identifier(sl, quotation_mark='"')}")
 
 class ServiceLevel:
-    def __init__(self, name: str, timeout: int|None = None, wl_type: str|None = None):
+    default_shares_value = 1000
+    
+    def __init__(self, name: str, timeout: int|None = None, wl_type: str|None = None, shares: int|None = None):
         self.name = name
         self.timeout = timeout
         self.wl_type = wl_type
+        self.shares = shares
 
-    def get_create_stmt(self) -> str:
+    # replace_default_shares - Scylla automatically assigns default value of shares it they are not
+    #                          specified. Set this argument to True to include the default shares in create statement
+    #                          to match describe result.
+    def get_create_stmt(self, replace_default_shares = False) -> str:
         # Note: `CREATE SERVICE LEVEL` statements returned by `DESC SCHEMA WITH INTERNALS` always uses
         #       `std::chrono::milliseconds` as its resolution. For that reason, we use milliseconds in
         #       create statements too so that they're easy to compare with Scylla's output.
         timeout = None if not self.timeout else f"TIMEOUT = {self.timeout}ms"
         wl_type = None if not self.wl_type else f"WORKLOAD_TYPE = '{self.wl_type}'"
+        shares = None if not self.shares else f"SHARES = {self.shares}"
+        if shares is None and replace_default_shares:
+            shares = f"SHARES = {self.default_shares_value}"
         
-        opts = [opt for opt in [timeout, wl_type] if opt is not None]
+        opts = [opt for opt in [timeout, wl_type, shares] if opt is not None]
         if opts:
             return f"CREATE SERVICE LEVEL {self.name} WITH {" AND ".join(opts)};"
 
@@ -2380,7 +2389,7 @@ def test_desc_service_levels_format(cql):
         assert result.keyspace_name == None
         assert result.type == "service_level"
         assert result.name == sl.name
-        assert result.create_statement == sl.get_create_stmt()
+        assert result.create_statement == sl.get_create_stmt(replace_default_shares=True)
 
 def test_desc_service_levels_quotation_marks(cql):
     """
@@ -2409,8 +2418,8 @@ def test_desc_service_levels_quotation_marks(cql):
         desc_iter = extract_create_statements(desc_elements)
 
         expected_result = {
-            sl1_double_quote.get_create_stmt(),
-            sl2_double_quote.get_create_stmt()
+            sl1_double_quote.get_create_stmt(replace_default_shares=True),
+            sl2_double_quote.get_create_stmt(replace_default_shares=True)
         }
 
         assert set(desc_iter) == expected_result
@@ -2434,7 +2443,7 @@ def test_desc_service_levels_uppercase(cql):
         assert list(sl_iter) == [sl.name]
 
         desc_iter = extract_create_statements(desc_elements)
-        assert list(desc_iter) == [sl.get_create_stmt()]
+        assert list(desc_iter) == [sl.get_create_stmt(replace_default_shares=True)]
 
 def test_desc_service_levels_unicode(cql):
     """
@@ -2455,7 +2464,7 @@ def test_desc_service_levels_unicode(cql):
         assert list(sl_iter) == [sl.name]
 
         desc_iter = extract_create_statements(desc_elements)
-        assert list(desc_iter) == [sl.get_create_stmt()]
+        assert list(desc_iter) == [sl.get_create_stmt(replace_default_shares=True)]
 
 def test_desc_auth_service_levels(cql):
     """
@@ -2474,8 +2483,12 @@ def test_desc_auth_service_levels(cql):
             # Timeout and workload parameter.
             ServiceLevel("sl7", timeout=25000, wl_type="interactive")
         }
+        service_levels |= { ServiceLevel(sl.name + 's', wl_type=sl.wl_type, timeout=sl.timeout, shares=400) for sl in service_levels }
 
-        sl_create_stmts = set(map(lambda sl: sl.get_create_stmt(), service_levels))
+        sl_create_stmts = set(map(lambda sl: sl.get_create_stmt(replace_default_shares=True), service_levels))
+
+        # Enterprise is limited in the number of service levels it supports
+        sl_create_stmts = set(random.sample(list(sl_create_stmts), k=5))
 
         for stmt in sl_create_stmts:
             cql.execute(stmt)
@@ -2485,6 +2498,33 @@ def test_desc_auth_service_levels(cql):
         desc_iter = extract_create_statements(desc_iter)
 
         assert sl_create_stmts == set(desc_iter)
+
+def test_desc_service_levels_default_shares(cql):
+    """
+    Verify that DESCRIBE handles the default value of shares correctly:
+    (a) when a service level is created without specifying the number of shares,
+        we should get a create statement with the default number of shares,
+    (b) when a service level is created with the default number of shares but specified explicitly,
+        we should get a create statement with that number of shares too.
+    """
+
+    with AuthSLContext(cql):
+        default_share_count = 1000
+
+        stmts = [
+            "CREATE SERVICE LEVEL sl_default;",
+            f"CREATE SERVICE LEVEL sl_set WITH SHARES = {default_share_count};",
+        ]
+
+        for stmt in stmts:
+            cql.execute(stmt)
+
+        desc_iter = cql.execute("DESC SCHEMA WITH INTERNALS")
+        desc_iter = filter_service_levels(desc_iter)
+        desc_iter = extract_create_statements(desc_iter)
+
+        stmts[0] = f"CREATE SERVICE LEVEL sl_default WITH SHARES = {default_share_count};"
+        assert stmts == list(desc_iter)
 
 def test_desc_attach_service_level_format(cql):
     """
@@ -2768,3 +2808,15 @@ def test_describe_udf_with_udt(cql, test_keyspace, scylla_only):
 
             expected_stmt = f"CREATE FUNCTION {test_keyspace}.{fn}{fn_content}"
             assert udf_stmt == expected_stmt
+
+# Test that the Scylla-only "tombstone_gc" option appears in the output of
+# "desc table". Reproduces issue #14390.
+# The test is marked scylla_only because Cassandra doesn't have this
+# "tombstone_gc" option.
+def test_desc_table_tombstone_gc(cql, test_keyspace, scylla_only):
+        with_clause = "tombstone_gc = {'mode': 'timeout', 'propagation_delay_in_seconds': '73'}"
+        with new_test_table(cql, test_keyspace, "p int PRIMARY KEY", "WITH " + with_clause) as table:
+            desc = cql.execute(f"DESCRIBE TABLE {table} WITH INTERNALS").one()
+            # ignore spaces in comparison, as different versions of Scylla
+            # add spaces in different places
+            assert with_clause.replace(' ','') in desc.create_statement.replace(' ','')

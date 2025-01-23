@@ -4,7 +4,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #include <boost/range/algorithm.hpp>
@@ -46,6 +46,7 @@
 #include "replica/query.hh"
 #include "types/types.hh"
 #include "service/raft/raft_group0_client.hh"
+#include "utils/shared_dict.hh"
 #include "replica/database.hh"
 
 #include <unordered_map>
@@ -94,7 +95,8 @@ namespace {
             system_keyspace::ROLE_MEMBERS,
             system_keyspace::ROLE_ATTRIBUTES,
             system_keyspace::ROLE_PERMISSIONS,
-            system_keyspace::v3::CDC_LOCAL
+            system_keyspace::v3::CDC_LOCAL,
+            system_keyspace::DICTS
         };
         if (ks_name == system_keyspace::NAME && tables.contains(cf_name)) {
             props.enable_schema_commitlog();
@@ -118,6 +120,7 @@ namespace {
                 system_keyspace::ROLE_MEMBERS,
                 system_keyspace::ROLE_ATTRIBUTES,
                 system_keyspace::ROLE_PERMISSIONS,
+                system_keyspace::DICTS,
             };
             if (ks_name == system_keyspace::NAME && tables.contains(cf_name)) {
                 props.is_group0_table = true;
@@ -805,7 +808,7 @@ schema_ptr system_keyspace::v3::batches() {
        // FIXME: the original Java code also had:
        //.copy(new LocalPartitioner(TimeUUIDType.instance))
        builder.set_gc_grace_seconds(0);
-       builder.set_compaction_strategy(sstables::compaction_strategy_type::size_tiered);
+       builder.set_compaction_strategy(sstables::compaction_strategy_type::incremental);
        builder.set_compaction_strategy_options({{"min_threshold", "2"}});
        builder.with_hash_version();
        return builder.build(schema_builder::compact_storage::no);
@@ -1154,6 +1157,7 @@ schema_ptr system_keyspace::service_levels_v2() {
                 .with_column("service_level", utf8_type, column_kind::partition_key)
                 .with_column("timeout", duration_type)
                 .with_column("workload_type", utf8_type)
+                .with_column("shares", int32_type)
                 .with_hash_version()
                 .build();
     }();
@@ -1288,7 +1292,7 @@ schema_ptr system_keyspace::legacy::hints() {
         "*DEPRECATED* hints awaiting delivery"
        );
        builder.set_gc_grace_seconds(0);
-       builder.set_compaction_strategy(sstables::compaction_strategy_type::size_tiered);
+       builder.set_compaction_strategy(sstables::compaction_strategy_type::incremental);
        builder.set_compaction_strategy_options({{"enabled", "false"}});
        builder.with(schema_builder::compact_storage::yes);
        builder.with_hash_version();
@@ -1314,7 +1318,7 @@ schema_ptr system_keyspace::legacy::batchlog() {
         "*DEPRECATED* batchlog entries"
        );
        builder.set_gc_grace_seconds(0);
-       builder.set_compaction_strategy(sstables::compaction_strategy_type::size_tiered);
+       builder.set_compaction_strategy(sstables::compaction_strategy_type::incremental);
        builder.set_compaction_strategy_options({{"min_threshold", "2"}});
        builder.with(schema_builder::compact_storage::no);
        builder.with_hash_version();
@@ -1550,6 +1554,20 @@ schema_ptr system_keyspace::legacy::aggregates() {
         builder.with(schema_builder::compact_storage::no);
         builder.with_hash_version();
         return builder.build();
+    }();
+    return schema;
+}
+
+schema_ptr system_keyspace::dicts() {
+    static thread_local auto schema = [] {
+        auto id = generate_legacy_id(NAME, DICTS);
+        return schema_builder(NAME, DICTS, std::make_optional(id))
+                .with_column("name", utf8_type, column_kind::partition_key)
+                .with_column("timestamp", timestamp_type)
+                .with_column("origin", uuid_type)
+                .with_column("data", bytes_type)
+                .with_hash_version()
+                .build();
     }();
     return schema;
 }
@@ -2062,7 +2080,7 @@ future<> system_keyspace::update_peer_info(gms::inet_address ep, locator::host_i
     if (!hid) {
         on_internal_error(slogger, format("update_peer_info called with empty host_id, ep {}", ep));
     }
-    if (_db.get_token_metadata().get_topology().is_me(ep)) {
+    if (_db.get_token_metadata().get_topology().is_me(hid)) {
         on_internal_error(slogger, format("update_peer_info called for this node: {}", ep));
     }
 
@@ -2296,6 +2314,7 @@ std::vector<schema_ptr> system_keyspace::all_tables(const db::config& cfg) {
                     v3::cdc_local(),
                     raft(), raft_snapshots(), raft_snapshot_config(), group0_history(), discovery(),
                     topology(), cdc_generations_v3(), topology_requests(), service_levels_v2(), view_build_status_v2(),
+                    dicts(),
     });
 
     if (cfg.check_experimental(db::experimental_features_t::feature::BROADCAST_TABLES)) {
@@ -3413,15 +3432,17 @@ future<system_keyspace::topology_requests_entry> system_keyspace::get_topology_r
     co_return topology_request_row_to_entry(id, row);
 }
 
-future<system_keyspace::topology_requests_entries> system_keyspace::get_topology_request_entries(db_clock::time_point end_time_limit) {
+future<system_keyspace::topology_requests_entries> system_keyspace::get_node_ops_request_entries(db_clock::time_point end_time_limit) {
     // Running requests.
     auto rs_running = co_await execute_cql(
-        format("SELECT * FROM system.{} WHERE done = false ALLOW FILTERING", TOPOLOGY_REQUESTS));
+        format("SELECT * FROM system.{} WHERE done = false AND request_type IN ('{}', '{}', '{}', '{}', '{}') ALLOW FILTERING", TOPOLOGY_REQUESTS,
+            service::topology_request::join, service::topology_request::replace, service::topology_request::rebuild, service::topology_request::leave, service::topology_request::remove));
 
 
     // Requests which finished after end_time_limit.
     auto rs_done = co_await execute_cql(
-        format("SELECT * FROM system.{} WHERE end_time > {} ALLOW FILTERING", TOPOLOGY_REQUESTS, end_time_limit.time_since_epoch().count()));
+        format("SELECT * FROM system.{} WHERE end_time > {} AND request_type IN ('{}', '{}', '{}', '{}', '{}') ALLOW FILTERING", TOPOLOGY_REQUESTS, end_time_limit.time_since_epoch().count(),
+            service::topology_request::join, service::topology_request::replace, service::topology_request::rebuild, service::topology_request::leave, service::topology_request::remove));
 
     topology_requests_entries m;
     for (const auto& row: *rs_done) {
@@ -3437,6 +3458,49 @@ future<system_keyspace::topology_requests_entries> system_keyspace::get_topology
     }
 
     co_return m;
+}
+
+future<mutation> system_keyspace::get_insert_dict_mutation(
+    bytes data,
+    locator::host_id host_id,
+    db_clock::time_point dict_ts,
+    api::timestamp_type write_ts
+) const {
+    const char* dict_name = "general";
+    slogger.debug("Publishing new compression dictionary: {} {} {}", dict_name, dict_ts, host_id);
+
+    static sstring insert_new = format("INSERT INTO {}.{} (name, timestamp, origin, data) VALUES (?, ?, ?, ?);", NAME, DICTS);
+    auto muts = co_await _qp.get_mutations_internal(insert_new, internal_system_query_state(), write_ts, {
+        data_value(dict_name),
+        data_value(dict_ts),
+        data_value(host_id.uuid()),
+        data_value(std::move(data)),
+    });
+    if (muts.size() != 1) {
+        on_internal_error(slogger, "Expected to prepare a single mutation, but got multiple.");
+    }
+    co_return std::move(muts[0]);
+}
+
+future<utils::shared_dict> system_keyspace::query_dict() const {
+    static sstring query = format("SELECT * FROM {}.{} WHERE name = ?;", NAME, DICTS);
+    auto result_set = co_await _qp.execute_internal(
+        query, db::consistency_level::ONE, internal_system_query_state(), {"general"}, cql3::query_processor::cache_internal::yes);
+    if (!result_set->empty()) {
+        auto &&row = result_set->one();
+        auto content = row.get_as<bytes>("data");
+        auto timestamp = row.get_as<db_clock::time_point>("timestamp").time_since_epoch().count();
+        auto origin = row.get_as<utils::UUID>("origin");
+        const int zstd_compression_level = 1;
+        co_return utils::shared_dict(
+            std::as_bytes(std::span(content)),
+            timestamp,
+            origin,
+            zstd_compression_level
+        );
+    } else {
+        co_return utils::shared_dict();
+    }
 }
 
 sstring system_keyspace_name() {

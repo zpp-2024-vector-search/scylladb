@@ -4,7 +4,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -25,6 +25,8 @@
 #include "utils/updateable_value.hh"
 #include "utils/s3/creds.hh"
 #include "utils/error_injection.hh"
+#include "utils/dict_trainer.hh"
+#include "utils/advanced_rpc_compressor.hh"
 
 namespace seastar {
 class file;
@@ -107,6 +109,7 @@ struct experimental_features_t {
         ALTERNATOR_STREAMS,
         BROADCAST_TABLES,
         KEYSPACE_STORAGE_OPTIONS,
+        VIEWS_WITH_TABLETS
     };
     static std::map<sstring, feature> map(); // See enum_option.
     static std::vector<enum_option<experimental_features_t>> all();
@@ -278,6 +281,18 @@ public:
     named_value<uint32_t> internode_send_buff_size_in_bytes;
     named_value<uint32_t> internode_recv_buff_size_in_bytes;
     named_value<sstring> internode_compression;
+    named_value<float> internode_compression_zstd_max_cpu_fraction;
+    named_value<uint32_t> internode_compression_zstd_cpu_quota_refresh_period_ms;
+    named_value<float> internode_compression_zstd_max_longterm_cpu_fraction;
+    named_value<uint32_t> internode_compression_zstd_longterm_cpu_quota_refresh_period_ms;
+    named_value<uint32_t> internode_compression_zstd_min_message_size;
+    named_value<uint32_t> internode_compression_zstd_max_message_size;
+    named_value<bool> internode_compression_checksumming;
+    named_value<utils::advanced_rpc_compressor::tracker::algo_config> internode_compression_algorithms;
+    named_value<bool> internode_compression_enable_advanced;
+    named_value<enum_option<utils::dict_training_loop::when>> rpc_dict_training_when;
+    named_value<uint32_t> rpc_dict_training_min_time_seconds;
+    named_value<uint64_t> rpc_dict_training_min_bytes;
     named_value<bool> inter_dc_tcp_nodelay;
     named_value<uint32_t> streaming_socket_timeout_in_ms;
     named_value<bool> start_native_transport;
@@ -489,6 +504,19 @@ public:
 
     named_value<uint32_t> service_levels_interval;
 
+    named_value<sstring> audit;
+    named_value<sstring> audit_categories;
+    named_value<sstring> audit_tables;
+    named_value<sstring> audit_keyspaces;
+    named_value<sstring> audit_unix_socket_path;
+    named_value<size_t> audit_syslog_write_buffer_size;
+
+    named_value<sstring> ldap_url_template;
+    named_value<sstring> ldap_attr_role;
+    named_value<sstring> ldap_bind_dn;
+    named_value<sstring> ldap_bind_passwd;
+    named_value<sstring> saslauthd_socket_path;
+
     seastar::logging_settings logging_settings(const log_cli::options&) const;
 
     const db::extensions& extensions() const;
@@ -499,6 +527,12 @@ public:
     named_value<double> topology_barrier_stall_detector_threshold_seconds;
     named_value<bool> enable_tablets;
     named_value<uint32_t> view_flow_control_delay_limit_in_ms;
+
+    named_value<int> disk_space_monitor_normal_polling_interval_in_seconds;
+    named_value<int> disk_space_monitor_high_polling_interval_in_seconds;
+    named_value<float> disk_space_monitor_polling_interval_threshold;
+
+    named_value<bool> enable_create_table_with_compact_storage;
 
     static const sstring default_tls_priority;
 private:

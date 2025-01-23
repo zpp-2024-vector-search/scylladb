@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "auth/standard_role_manager.hh"
@@ -12,7 +12,6 @@
 #include <unordered_set>
 #include <vector>
 
-#include <boost/algorithm/string/join.hpp>
 #include <seastar/core/future-util.hh>
 #include <seastar/core/on_internal_error.hh>
 #include <seastar/core/format.hh>
@@ -30,8 +29,8 @@
 #include "db/consistency_level_type.hh"
 #include "exceptions/exceptions.hh"
 #include "utils/log.hh"
-#include "seastar/core/loop.hh"
-#include "seastar/coroutine/maybe_yield.hh"
+#include <seastar/core/loop.hh>
+#include <seastar/coroutine/maybe_yield.hh>
 #include "service/raft/raft_group0_client.hh"
 #include "utils/class_registrator.hh"
 #include "service/migration_manager.hh"
@@ -330,7 +329,7 @@ standard_role_manager::alter(std::string_view role_name, const role_config_updat
             assignments.push_back(sstring("can_login = ") + (*u.can_login ? "true" : "false"));
         }
 
-        return boost::algorithm::join(assignments, ", ");
+        return fmt::to_string(fmt::join(assignments, ", "));
     };
 
     return require_record(_qp, role_name).then([this, role_name, &u, &mc](record) {

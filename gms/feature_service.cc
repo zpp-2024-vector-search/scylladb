@@ -1,5 +1,5 @@
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  *
  * Copyright (C) 2020-present ScyllaDB
  */
@@ -14,7 +14,6 @@
 #include "db/system_keyspace.hh"
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/split.hpp>
-#include <boost/range/adaptor/map.hpp>
 #include "gms/gossiper.hh"
 #include "gms/i_endpoint_state_change_subscriber.hh"
 #include "utils/assert.hh"
@@ -82,6 +81,9 @@ feature_config feature_config_from_db_config(const db::config& cfg, std::set<sst
     }
     if (!cfg.check_experimental(db::experimental_features_t::feature::KEYSPACE_STORAGE_OPTIONS)) {
         fcfg._disabled_features.insert("KEYSPACE_STORAGE_OPTIONS"s);
+    }
+    if (!cfg.check_experimental(db::experimental_features_t::feature::VIEWS_WITH_TABLETS)) {
+        fcfg._disabled_features.insert("VIEWS_WITH_TABLETS"s);
     }
     if (cfg.force_gossip_topology_changes()) {
         if (cfg.enable_tablets()) {
@@ -234,6 +236,7 @@ db::schema_features feature_service::cluster_schema_features() const {
     f.set_if<db::schema_feature::SCYLLA_AGGREGATES>(aggregate_storage_options);
     f.set_if<db::schema_feature::TABLE_DIGEST_INSENSITIVE_TO_EXPIRY>(table_digest_insensitive_to_expiry);
     f.set_if<db::schema_feature::GROUP0_SCHEMA_VERSIONING>(group0_schema_versioning);
+    f.set_if<db::schema_feature::IN_MEMORY_TABLES>(bool(in_memory_tables));
     return f;
 }
 
@@ -308,7 +311,7 @@ future<> feature_service::enable_features_on_startup(db::system_keyspace& sys_ks
     }
 
     co_await container().invoke_on_all([&features_to_enable] (auto& srv) -> future<> {
-        std::set<std::string_view> feat = boost::copy_range<std::set<std::string_view>>(features_to_enable);
+        auto feat = features_to_enable | std::ranges::to<std::set<std::string_view>>();
         co_await srv.enable(std::move(feat));
     });
 }
@@ -380,7 +383,7 @@ future<> persistent_feature_enabler::enable_features() {
     co_await _sys_ks.save_local_enabled_features(std::move(feats_set), true);
 
     co_await _feat.container().invoke_on_all([&features] (feature_service& fs) -> future<> {
-        std::set<std::string_view> features_v = boost::copy_range<std::set<std::string_view>>(features);
+        auto features_v = features | std::ranges::to<std::set<std::string_view>>();
         co_await fs.enable(std::move(features_v));
     });
 }

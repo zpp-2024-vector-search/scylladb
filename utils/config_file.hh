@@ -4,18 +4,17 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 
 #include <fmt/format.h>
-#include <fmt/ostream.h>
+
 #include <unordered_map>
-#include <iosfwd>
 #include <string_view>
 
-#include <boost/program_options.hpp>
+#include <boost/program_options/options_description.hpp>
 
 #include <seastar/core/sstring.hh>
 #include <seastar/core/future.hh>
@@ -51,7 +50,7 @@ public:
 };
 
 template <typename T>
-extern const config_type config_type_for;
+extern const config_type& config_type_for();
 
 class config_file {
     static thread_local unsigned s_shard_id;
@@ -194,7 +193,7 @@ public:
 
         named_value(config_file* file, std::string_view name, std::string_view alias, liveness liveness_, value_status vs, const T& t = T(), std::string_view desc = {},
                 std::initializer_list<T> allowed_values = {})
-            : config_src(file, name, alias, &config_type_for<T>, desc)
+            : config_src(file, name, alias, &config_type_for<T>(), desc)
             , _value_status(vs)
             , _liveness(liveness_)
             , _allowed_values(std::move(allowed_values)) {
@@ -270,6 +269,8 @@ public:
 
     config_file(std::initializer_list<cfg_ref> = {});
     config_file(const config_file&) = delete;
+
+    virtual ~config_file() = default;
 
     void add(cfg_ref, std::unique_ptr<any_value> value);
     void add(std::initializer_list<cfg_ref>);

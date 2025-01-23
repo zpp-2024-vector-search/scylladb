@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <fmt/ranges.h>
@@ -11,9 +11,12 @@
 #include "auth/standard_role_manager.hh"
 
 #include "service/raft/raft_group0_client.hh"
-#include "test/lib/scylla_test_case.hh"
+#undef SEASTAR_TESTING_MAIN
+#include <seastar/testing/test_case.hh>
 #include "test/lib/test_utils.hh"
 #include "test/lib/cql_test_env.hh"
+
+BOOST_AUTO_TEST_SUITE(role_manager_test)
 
 auto make_manager(cql_test_env& env) {
     auto stop_role_manager = [] (auth::standard_role_manager* m) {
@@ -240,3 +243,5 @@ SEASTAR_TEST_CASE(alter_role) {
         });
     });
 }
+
+BOOST_AUTO_TEST_SUITE_END()

@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #include "auth/default_authorizer.hh"
@@ -16,7 +16,6 @@ extern "C" {
 #include <unistd.h>
 }
 
-#include <boost/algorithm/string/join.hpp>
 #include <boost/range.hpp>
 #include <seastar/core/seastar.hh>
 #include <seastar/core/sleep.hh>

@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -15,10 +15,11 @@ class routes;
 }
 
 namespace locator { class shared_token_metadata; }
+namespace gms { class gossiper; }
 
 namespace api {
 struct http_context;
-void set_token_metadata(http_context& ctx, seastar::httpd::routes& r, seastar::sharded<locator::shared_token_metadata>& tm);
+void set_token_metadata(http_context& ctx, seastar::httpd::routes& r, seastar::sharded<locator::shared_token_metadata>& tm, seastar::sharded<gms::gossiper>& g);
 void unset_token_metadata(http_context& ctx, seastar::httpd::routes& r);
 
 }

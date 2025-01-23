@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "schema/schema_registry.hh"
@@ -18,8 +18,6 @@
 #include <fmt/core.h>
 #include <seastar/core/coroutine.hh>
 #include <seastar/coroutine/as_future.hh>
-
-#include <boost/range/adaptor/reversed.hpp>
 
 #include <fmt/ostream.h>
 

@@ -22,6 +22,8 @@ if(DEFINED CMAKE_BUILD_TYPE)
     endif()
 endif(DEFINED CMAKE_BUILD_TYPE)
 
+option(Scylla_ENABLE_LTO "Turn on link-time optimization for the 'release' mode." ON)
+
 include(mode.common)
 get_property(is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
 if(is_multi_config)
@@ -42,6 +44,7 @@ else()
 endif()
 
 include(limit_jobs)
+
 # Configure Seastar compile options to align with Scylla
 set(CMAKE_CXX_STANDARD "23" CACHE INTERNAL "")
 set(CMAKE_CXX_EXTENSIONS ON CACHE INTERNAL "")
@@ -92,7 +95,7 @@ else()
     set(Seastar_EXCLUDE_APPS_FROM_ALL ON CACHE BOOL "" FORCE)
     set(Seastar_EXCLUDE_TESTS_FROM_ALL ON CACHE BOOL "" FORCE)
     set(Seastar_IO_URING ON CACHE BOOL "" FORCE)
-    set(Seastar_SCHEDULING_GROUPS_COUNT 16 CACHE STRING "" FORCE)
+    set(Seastar_SCHEDULING_GROUPS_COUNT 19 CACHE STRING "" FORCE)
     set(Seastar_UNUSED_RESULT_ERROR ON CACHE BOOL "" FORCE)
     add_subdirectory(seastar)
     target_compile_definitions (seastar
@@ -102,13 +105,17 @@ endif()
 
 set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
 
+if(Scylla_ENABLE_LTO)
+    list(APPEND absl_cxx_flags $<$<CONFIG:RelWithDebInfo>:${CMAKE_CXX_COMPILE_OPTIONS_IPO};-ffat-lto-objects>)
+endif()
+
 find_package(Sanitizers QUIET)
-set(sanitizer_cxx_flags
+list(APPEND absl_cxx_flags
     $<$<CONFIG:Debug,Sanitize>:$<TARGET_PROPERTY:Sanitizers::address,INTERFACE_COMPILE_OPTIONS>;$<TARGET_PROPERTY:Sanitizers::undefined_behavior,INTERFACE_COMPILE_OPTIONS>>)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    set(ABSL_GCC_FLAGS ${sanitizer_cxx_flags})
+    list(APPEND ABSL_GCC_FLAGS ${absl_cxx_flags})
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    set(ABSL_LLVM_FLAGS ${sanitizer_cxx_flags})
+    list(APPEND ABSL_LLVM_FLAGS ${absl_cxx_flags})
 endif()
 set(ABSL_DEFAULT_LINKOPTS
     $<$<CONFIG:Debug,Sanitize>:$<TARGET_PROPERTY:Sanitizers::address,INTERFACE_LINK_LIBRARIES>;$<TARGET_PROPERTY:Sanitizers::undefined_behavior,INTERFACE_LINK_LIBRARIES>>)
@@ -141,11 +148,13 @@ find_package(ICU COMPONENTS uc i18n REQUIRED)
 find_package(fmt 10.0.0 REQUIRED)
 find_package(libdeflate REQUIRED)
 find_package(libxcrypt REQUIRED)
+find_package(p11-kit REQUIRED)
 find_package(Snappy REQUIRED)
 find_package(RapidJSON REQUIRED)
 find_package(xxHash REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(zstd REQUIRED)
+find_package(lz4 REQUIRED)
 
 set(scylla_gen_build_dir "${CMAKE_BINARY_DIR}/gen")
 file(MAKE_DIRECTORY "${scylla_gen_build_dir}")
@@ -191,6 +200,7 @@ target_sources(scylla-main
     tombstone_gc_options.cc
     tombstone_gc.cc
     reader_concurrency_semaphore.cc
+    reader_concurrency_semaphore_group.cc
     row_cache.cc
     schema_mutations.cc
     serializer.cc
@@ -213,7 +223,10 @@ target_link_libraries(scylla-main
     Seastar::seastar
     Snappy::snappy
     systemd
-    ZLIB::ZLIB)
+    ZLIB::ZLIB
+    lz4::lz4_static
+    zstd::zstd_static
+)
 
 option(Scylla_CHECK_HEADERS
   "Add check-headers target for checking the self-containness of headers")
@@ -248,6 +261,7 @@ add_custom_target(compiler-training)
 
 add_subdirectory(api)
 add_subdirectory(alternator)
+add_subdirectory(audit)
 add_subdirectory(db)
 add_subdirectory(auth)
 add_subdirectory(cdc)
@@ -255,6 +269,7 @@ add_subdirectory(compaction)
 add_subdirectory(cql3)
 add_subdirectory(data_dictionary)
 add_subdirectory(dht)
+add_subdirectory(ent)
 add_subdirectory(gms)
 add_subdirectory(idl)
 add_subdirectory(index)
@@ -285,7 +300,8 @@ add_version_library(scylla_version
 
 add_executable(scylla
   main.cc)
-target_link_libraries(scylla PRIVATE
+set(scylla_libs
+    audit
     scylla-main
     api
     auth
@@ -296,10 +312,12 @@ target_link_libraries(scylla PRIVATE
     cql3
     data_dictionary
     dht
+    encryption
     gms
     idl
     index
     lang
+    ldap
     locator
     message
     mutation
@@ -320,8 +338,18 @@ target_link_libraries(scylla PRIVATE
     transport
     types
     utils)
+target_link_libraries(scylla PRIVATE
+    ${scylla_libs})
+
+if(Scylla_ENABLE_LTO)
+  include(enable_lto)
+  foreach(target scylla ${scylla_libs})
+    enable_lto(${target})
+  endforeach()
+endif()
 
 target_link_libraries(scylla PRIVATE
+    p11-kit::p11-kit
     Seastar::seastar
     absl::headers
     yaml-cpp::yaml-cpp
@@ -338,4 +366,8 @@ add_dependencies(compiler-training
 
 if(Scylla_DIST)
   add_subdirectory(dist)
+endif()
+
+if(Scylla_BUILD_INSTRUMENTED)
+  add_subdirectory(pgo)
 endif()

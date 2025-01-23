@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -18,8 +18,13 @@ namespace statements {
 class sl_prop_defs : public property_definitions {
     qos::service_level_options _slo;
 public:
-
     void validate();
+
+    static constexpr auto KW_SHARES = "shares";
+    static constexpr int SHARES_DEFAULT_VAL = 1000;
+    static constexpr int SHARES_MIN_VAL = 1;
+    static constexpr int SHARES_MAX_VAL = 1000;
+
     qos::service_level_options get_service_level_options() const;
 };
 

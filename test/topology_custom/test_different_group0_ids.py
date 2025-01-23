@@ -1,7 +1,7 @@
 #
 # Copyright (C) 2023-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 
 from test.pylib.manager_client import ManagerClient
@@ -28,8 +28,9 @@ async def test_different_group0_ids(manager: ManagerClient):
     """
 
     # Consistent topology changes are disabled to use repair based node operations.
-    scylla_a = await manager.server_add(config={'force_gossip_topology_changes': True})
-    scylla_b = await manager.server_add(start=False, config={'force_gossip_topology_changes': True})
+    cfg = {'force_gossip_topology_changes': True, 'enable_tablets': False}
+    scylla_a = await manager.server_add(config = cfg)
+    scylla_b = await manager.server_add(start=False, config = cfg)
     await manager.server_start(scylla_b.server_id, seeds=[scylla_b.ip_addr])
 
     await manager.server_stop(scylla_b.server_id)

@@ -3,14 +3,13 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 
 #include <concepts>
 #include <type_traits>
-#include "utils/assert.hh"
 #include "utils/result.hh"
 
 namespace utils {

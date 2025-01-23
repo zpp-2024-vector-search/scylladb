@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #include "exceptions/exceptions.hh"
@@ -29,6 +29,7 @@
 #include "gms/feature_service.hh"
 #include "db/view/view.hh"
 #include "service/migration_manager.hh"
+#include "replica/database.hh"
 
 namespace cql3 {
 
@@ -396,7 +397,7 @@ create_view_statement::prepare(data_dictionary::database db, cql_stats& stats) {
     if (!_prepare_ctx.get_variable_specifications().empty()) {
         throw exceptions::invalid_request_exception(format("Cannot use query parameters in CREATE MATERIALIZED VIEW statements"));
     }
-    return std::make_unique<prepared_statement>(make_shared<create_view_statement>(*this));
+    return std::make_unique<prepared_statement>(audit_info(), make_shared<create_view_statement>(*this));
 }
 
 ::shared_ptr<schema_altering_statement::event_t> create_view_statement::created_event() const {

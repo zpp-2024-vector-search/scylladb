@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -14,6 +14,10 @@
 #include <seastar/core/sstring.hh>
 #include "schema/schema_fwd.hh"
 #include "seastarx.hh"
+
+namespace seastar {
+    class abort_source;
+}
 
 namespace data_dictionary {
 
@@ -30,6 +34,7 @@ struct storage_options {
         sstring bucket;
         sstring endpoint;
         std::variant<sstring, table_id> location;
+        seastar::abort_source* abort_source = nullptr;
         static constexpr std::string_view name = "S3";
 
         static s3 from_map(const std::map<sstring, sstring>&);

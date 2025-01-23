@@ -3,20 +3,20 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <algorithm>
 
 #include <boost/range/irange.hpp>
 #include <boost/range/algorithm.hpp>
-#include <boost/range/adaptor/uniqued.hpp>
 #include <boost/test/unit_test.hpp>
 #include <boost/multiprecision/cpp_int.hpp>
 
 #include <seastar/net/inet_address.hh>
 
-#include "test/lib/scylla_test_case.hh"
+#undef SEASTAR_TESTING_MAIN
+#include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/cql_assertions.hh"
@@ -25,10 +25,13 @@
 #include "transport/messages/result_message.hh"
 #include "utils/assert.hh"
 #include "utils/big_decimal.hh"
+#include "utils/unique_view.hh"
 #include "types/map.hh"
 #include "types/list.hh"
 #include "types/set.hh"
 #include "schema/schema_builder.hh"
+
+BOOST_AUTO_TEST_SUITE(cql_functions_test)
 
 using namespace std::literals::chrono_literals;
 
@@ -72,7 +75,7 @@ SEASTAR_TEST_CASE(test_functions) {
             msg->accept(v);
             // No boost::adaptors::sorted
             std::ranges::sort(v.res);
-            BOOST_REQUIRE_EQUAL(boost::distance(v.res | boost::adaptors::uniqued), 3);
+            BOOST_REQUIRE_EQUAL(std::ranges::distance(v.res | utils::views::unique), 3);
         }).then([&] {
             return e.execute_cql("select sum(c1), count(c1) from cf where p1 = 'key1';");
         }).then([] (shared_ptr<cql_transport::messages::result_message> msg) {
@@ -408,3 +411,5 @@ SEASTAR_TEST_CASE(test_aggregate_functions_map_type) {
         ).test_min_max_count();
     });
 }
+
+BOOST_AUTO_TEST_SUITE_END()

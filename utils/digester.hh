@@ -3,12 +3,13 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 
 #include "utils/digest_algorithm.hh"
+#include "utils/hashing.hh"
 #include "utils/xx_hasher.hh"
 
 #include <type_traits>

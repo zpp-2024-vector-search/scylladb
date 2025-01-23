@@ -4,7 +4,7 @@
 # Copyright (C) 2015-present ScyllaDB
 #
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 import argparse
 import asyncio
@@ -23,12 +23,15 @@ import resource
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
 import traceback
 import xml.etree.ElementTree as ET
 import yaml
+from random import randint
+from tempfile import TemporaryDirectory
 
 from abc import ABC, abstractmethod
 from io import StringIO
@@ -58,6 +61,73 @@ all_modes = {'debug': 'Debug',
              'sanitize': 'Sanitize',
              'coverage': 'Coverage'}
 debug_modes = {'debug', 'sanitize'}
+
+LDAP_SERVER_CONFIGURATION_FILE = os.path.join(os.path.dirname(__file__), 'test', 'resource', 'slapd.conf')
+
+DEFAULT_ENTRIES = [
+    """dn: dc=example,dc=com
+objectClass: dcObject
+objectClass: organization
+dc: example
+o: Example
+description: Example directory.
+""",
+    """dn: cn=root,dc=example,dc=com
+objectClass: organizationalRole
+cn: root
+description: Directory manager.
+""",
+    """dn: ou=People,dc=example,dc=com
+objectClass: organizationalUnit
+ou: People
+description: Our people.
+""",
+    """# Default superuser for Scylla
+dn: uid=cassandra,ou=People,dc=example,dc=com
+objectClass: organizationalPerson
+objectClass: uidObject
+cn: cassandra
+ou: People
+sn: cassandra
+userid: cassandra
+userPassword: cassandra
+""",
+    """dn: uid=jsmith,ou=People,dc=example,dc=com
+objectClass: organizationalPerson
+objectClass: uidObject
+cn: Joe Smith
+ou: People
+sn: Smith
+userid: jsmith
+userPassword: joeisgreat
+""",
+    """dn: uid=jdoe,ou=People,dc=example,dc=com
+objectClass: organizationalPerson
+objectClass: uidObject
+cn: John Doe
+ou: People
+sn: Doe
+userid: jdoe
+userPassword: pa55w0rd
+""",
+    """dn: cn=role1,dc=example,dc=com
+objectClass: groupOfUniqueNames
+cn: role1
+uniqueMember: uid=jsmith,ou=People,dc=example,dc=com
+uniqueMember: uid=cassandra,ou=People,dc=example,dc=com
+""",
+    """dn: cn=role2,dc=example,dc=com
+objectClass: groupOfUniqueNames
+cn: role2
+uniqueMember: uid=cassandra,ou=People,dc=example,dc=com
+""",
+    """dn: cn=role3,dc=example,dc=com
+objectClass: groupOfUniqueNames
+cn: role3
+uniqueMember: uid=jdoe,ou=People,dc=example,dc=com
+""",
+]
+
 
 def create_formatter(*decorators) -> Callable[[Any], str]:
     """Return a function which decorates its argument with the given
@@ -93,14 +163,8 @@ def path_to(mode, *components):
     build_dir = 'build'
     if os.path.exists(os.path.join(build_dir, 'build.ninja')):
         *dir_components, basename = components
-        exe_path = os.path.join(build_dir, *dir_components, all_modes[mode], basename)
-    else:
-        exe_path = os.path.join(build_dir, mode, *components)
-    if not os.access(exe_path, os.F_OK):
-        raise FileNotFoundError(f"{exe_path} does not exist.")
-    elif not os.access(exe_path, os.X_OK):
-        raise PermissionError(f"{exe_path} is not executable.")
-    return exe_path
+        return os.path.join(build_dir, *dir_components, all_modes[mode], basename)
+    return os.path.join(build_dir, mode, *components)
 
 
 def ninja(target):
@@ -246,6 +310,7 @@ class TestSuite(ABC):
                     break
         except asyncio.CancelledError:
             test.is_cancelled = True
+            raise
         finally:
             self.pending_test_count -= 1
             self.n_failed += int(test.failed)
@@ -352,6 +417,12 @@ class UnitTestSuite(TestSuite):
 
     @property
     def pattern(self) -> str:
+        # This should only match individual tests and not combined_tests.cc
+        # file of the combined test.
+        # It is because combined_tests.cc itself does not contain any tests.
+        # To keep the code simple, we have avoided this by renaming
+        # combined test file to “_tests.cc” instead of changing the match
+        # pattern.
         return "*_test.cc"
 
 
@@ -362,11 +433,49 @@ class BoostTestSuite(UnitTestSuite):
     # --list_content. Static to share across all modes.
     _case_cache: Dict[str, List[str]] = dict()
 
+    _exec_name_cache: Dict[str, str] = dict()
+
+    def _generate_cache(self, exec_path, exec_name) -> None:
+        res = subprocess.run(
+                [exec_path, '--list_content'],
+                check=True,
+                capture_output=True,
+                env=dict(os.environ,
+                         **{"ASAN_OPTIONS": "halt_on_error=0"}),
+            )
+        testname = None
+        fqname = None
+        for line in res.stderr.decode().splitlines():
+            if not line.startswith('    '):
+                testname = line.strip().rstrip('*')
+                fqname = os.path.join(self.mode, self.name, testname)
+                self._exec_name_cache[fqname] = exec_name
+                self._case_cache[fqname] = []
+            else:
+                casename = line.strip().rstrip('*')
+                if casename.startswith('_'):
+                    continue
+                self._case_cache[fqname].append(casename)
+
     def __init__(self, path, cfg: dict, options: argparse.Namespace, mode) -> None:
         super().__init__(path, cfg, options, mode)
+        exec_name = 'combined_tests'
+        exec_path = path_to(self.mode, "test", self.name, exec_name)
+        # Apply combined test only for test/boost,
+        # cache the tests only if the executable exists, so we can
+        # run test.py with a partially built tree
+        if self.name == 'boost' and os.path.exists(exec_path):
+            self._generate_cache(exec_path, exec_name)
 
     async def create_test(self, shortname: str, casename: str, suite, args) -> None:
-        exe = path_to(suite.mode, "test", suite.name, shortname)
+        fqname = os.path.join(self.mode, self.name, shortname)
+        if fqname in self._exec_name_cache:
+            execname = self._exec_name_cache[fqname]
+            combined_test = True
+        else:
+            execname = None
+            combined_test = False
+        exe = path_to(suite.mode, "test", suite.name, execname if combined_test else shortname)
         if not os.access(exe, os.X_OK):
             print(palette.warn(f"Boost test executable {exe} not found."))
             return
@@ -374,6 +483,8 @@ class BoostTestSuite(UnitTestSuite):
         allows_compaction_groups = self.all_can_run_compaction_groups_except != None and shortname not in self.all_can_run_compaction_groups_except
         if options.parallel_cases and (shortname not in self.no_parallel_cases) and casename is None:
             fqname = os.path.join(self.mode, self.name, shortname)
+            # since combined tests are preloaded to self._case_cache, this will
+            # only run in non-combined test mode
             if fqname not in self._case_cache:
                 process = await asyncio.create_subprocess_exec(
                     exe, *['--list_content'],
@@ -398,15 +509,35 @@ class BoostTestSuite(UnitTestSuite):
 
             case_list = self._case_cache[fqname]
             if len(case_list) == 1:
-                test = BoostTest(self.next_id((shortname, self.suite_key)), shortname, suite, args, None, allows_compaction_groups)
+                test = BoostTest(self.next_id((shortname, self.suite_key)), shortname, suite, args, None, allows_compaction_groups, execname)
                 self.tests.append(test)
             else:
                 for case in case_list:
-                    test = BoostTest(self.next_id((shortname, self.suite_key, case)), shortname, suite, args, case, allows_compaction_groups)
+                    test = BoostTest(self.next_id((shortname, self.suite_key, case)), shortname, suite, args, case, allows_compaction_groups, execname)
                     self.tests.append(test)
         else:
-            test = BoostTest(self.next_id((shortname, self.suite_key)), shortname, suite, args, casename, allows_compaction_groups)
+            test = BoostTest(self.next_id((shortname, self.suite_key)), shortname, suite, args, casename, allows_compaction_groups, execname)
             self.tests.append(test)
+
+    async def add_test(self, shortname, casename) -> None:
+        """Create a UnitTest class with possibly custom command line
+        arguments and add it to the list of tests"""
+        fqname = os.path.join(self.mode, self.name, shortname)
+        if fqname in self._exec_name_cache:
+            execname = self._exec_name_cache[fqname]
+            combined_test = True
+        else:
+            combined_test = False
+        # Skip tests which are not configured, and hence are not built
+        if os.path.join("test", self.name, execname if combined_test else shortname) not in self.options.tests:
+                return
+
+        # Default seastar arguments, if not provided in custom test options,
+        # are two cores and 2G of RAM
+        args = self.custom_args.get(shortname, ["-c2 -m2G"])
+        args = merge_cmdline_options(args, self.options.extra_scylla_cmdline_options)
+        for a in args:
+            await self.create_test(shortname, casename, self, a)
 
     def junit_tests(self) -> Iterable['Test']:
         """Boost tests produce an own XML output, so are not included in a junit report"""
@@ -414,6 +545,19 @@ class BoostTestSuite(UnitTestSuite):
 
     def boost_tests(self) -> Iterable['Tests']:
         return self.tests
+
+
+class LdapTestSuite(UnitTestSuite):
+    """TestSuite for ldap unit tests"""
+
+    async def create_test(self, shortname, casename, suite, args):
+        test = LdapTest(self.next_id((shortname, self.suite_key)), shortname, suite, args)
+        self.tests.append(test)
+
+    def junit_tests(self):
+        """Ldap tests produce an own XML output, so are not included in a junit report"""
+        return []
+
 
 class PythonTestSuite(TestSuite):
     """A collection of Python pytests against a single Scylla instance"""
@@ -522,6 +666,13 @@ class PythonTestSuite(TestSuite):
     async def add_test(self, shortname, casename) -> None:
         test = PythonTest(self.next_id((shortname, self.suite_key)), shortname, casename, self)
         self.tests.append(test)
+
+    async def run(self, test: 'Test', options: argparse.Namespace):
+        if not os.access(self.scylla_exe, os.F_OK):
+            raise FileNotFoundError(f"{self.scylla_exe} does not exist.")
+        if not os.access(self.scylla_exe, os.X_OK):
+            raise PermissionError(f"{self.scylla_exe} is not executable.")
+        return await super().run(test, options)
 
 
 class CQLApprovalTestSuite(PythonTestSuite):
@@ -671,6 +822,16 @@ class Test:
     def print_summary(self) -> None:
         pass
 
+    async def setup(self, port, options):
+        """
+        Performs any necessary setup steps before running a test.
+        Returns (fn, txt, test_env) where:
+        fn  - is a cleanup function to call unconditionally after the test stops running
+        txt - is failure-injection description.
+        test_env - is a dictionary containing environment variables map specific for the test
+        """
+        return (lambda: 0, None,{})
+
     def check_log(self, trim: bool) -> None:
         """Check and trim logs and xml output for tests which have it"""
         if trim:
@@ -714,16 +875,38 @@ class UnitTest(Test):
 
 TestPath = collections.namedtuple('TestPath', ['suite_name', 'test_name', 'case_name'])
 
-class BoostTest(UnitTest):
+class BoostTest(Test):
     """A unit test which can produce its own XML output"""
 
+    standard_args = shlex.split("--overprovisioned --unsafe-bypass-fsync 1 "
+                                "--kernel-page-cache 1 "
+                                "--blocked-reactor-notify-ms 2000000 --collectd 0 "
+                                "--max-networking-io-control-blocks=100 ")
+
     def __init__(self, test_no: int, shortname: str, suite, args: str,
-                 casename: Optional[str], allows_compaction_groups : bool) -> None:
+                 casename: Optional[str], allows_compaction_groups : bool, execname: Optional[str]) -> None:
         boost_args = []
+        combined_test = True if execname else False
+        _shortname = shortname
         if casename:
             shortname += '.' + casename
-            boost_args += ['--run_test=' + casename]
-        super().__init__(test_no, shortname, suite, args)
+            if combined_test:
+                boost_args += ['--run_test=' + _shortname + '/' + casename]
+            else:
+                boost_args += ['--run_test=' + casename]
+        else:
+            if combined_test:
+                boost_args += ['--run_test=' + _shortname]
+
+        super().__init__(test_no, shortname, suite)
+        if combined_test:
+            self.path = path_to(self.mode, "test", suite.name, execname)
+        else:
+            self.path = path_to(self.mode, "test", suite.name, shortname.split('.')[0])
+        self.args = shlex.split(args) + UnitTest.standard_args
+        if self.mode == "coverage":
+            self.env.update(coverage.env(self.path))
+
         self.xmlout = os.path.join(suite.options.tmpdir, self.mode, "xml", self.uname + ".xunit.xml")
         boost_args += ['--report_level=no',
                        '--logger=HRF,test_suite:XML,test_suite,' + self.xmlout]
@@ -784,11 +967,124 @@ class BoostTest(UnitTest):
             self.args += ['--random-seed', options.random_seed]
         if self.allows_compaction_groups and options.x_log2_compaction_groups:
             self.args += [ "--x-log2-compaction-groups", str(options.x_log2_compaction_groups) ]
-        return await super().run(options)
+        self.success = await run_test(self, options, env=self.env)
+        logging.info("Test %s %s", self.uname, "succeeded" if self.success else "failed ")
+        return self
 
     def write_junit_failure_report(self, xml_res: ET.Element) -> None:
         """Does not write junit report for Jenkins legacy reasons"""
         assert False
+
+    def print_summary(self) -> None:
+        print("Output of {} {}:".format(self.path, " ".join(self.args)))
+        print(read_log(self.log_filename))
+
+
+def can_connect(address, family=socket.AF_INET):
+    s = socket.socket(family)
+    try:
+        s.connect(address)
+        return True
+    except OSError as e:
+        if 'AF_UNIX path too long' in str(e):
+            raise OSError(e.errno, "{} ({})".format(str(e), address)) from None
+        else:
+            return False
+    except:
+        return False
+
+
+def try_something_backoff(something):
+    sleep_time = 0.05
+    while not something():
+        if sleep_time > 30:
+            return False
+        time.sleep(sleep_time)
+        sleep_time *= 2
+    return True
+
+def make_saslauthd_conf(port, instance_path):
+    """Creates saslauthd.conf with appropriate contents under instance_path.  Returns the path to the new file."""
+    saslauthd_conf_path = os.path.join(instance_path, 'saslauthd.conf')
+    with open(saslauthd_conf_path, 'w') as f:
+        f.write('ldap_servers: ldap://localhost:{}\nldap_search_base: dc=example,dc=com'.format(port))
+    return saslauthd_conf_path
+
+
+class LdapTest(BoostTest):
+    """A unit test which can produce its own XML output, and needs an ldap server"""
+
+    def __init__(self, test_no, shortname, args, suite):
+        super().__init__(test_no, shortname, args, suite, None, False, None)
+
+    async def setup(self, port, options):
+        instances_root = os.path.join(options.tmpdir, self.mode, 'ldap_instances');
+        instance_path = os.path.join(os.path.abspath(instances_root), str(port))
+        slapd_pid_file = os.path.join(instance_path, 'slapd.pid')
+        saslauthd_socket_path = TemporaryDirectory()
+        os.makedirs(instance_path, exist_ok=True)
+        # This will always fail because it lacks the permissions to read the default slapd data
+        # folder but it does create the instance folder so we don't want to fail here.
+        try:
+            subprocess.check_output(['slaptest', '-f', LDAP_SERVER_CONFIGURATION_FILE, '-F', instance_path],
+                                    stderr=subprocess.DEVNULL)
+        except:
+            pass
+        # Set up failure injection.
+        proxy_name = 'p{}'.format(port)
+        subprocess.check_output([
+            'toxiproxy-cli', 'c', proxy_name,
+            '--listen', 'localhost:{}'.format(port + 2), '--upstream', 'localhost:{}'.format(port)])
+        # Sever the connection after byte_limit bytes have passed through:
+        byte_limit = options.byte_limit if options.byte_limit else randint(0, 2000)
+        subprocess.check_output(['toxiproxy-cli', 't', 'a', proxy_name, '-t', 'limit_data', '-n', 'limiter',
+                                 '-a', 'bytes={}'.format(byte_limit)])
+        # Change the data folder in the default config.
+        replace_expression = 's/olcDbDirectory:.*/olcDbDirectory: {}/g'.format(
+            os.path.abspath(instance_path).replace('/', r'\/'))
+        subprocess.check_output(
+            ['find', instance_path, '-type', 'f', '-exec', 'sed', '-i', replace_expression, '{}', ';'])
+        # Change the pid file to be kept with the instance.
+        replace_expression = 's/olcPidFile:.*/olcPidFile: {}/g'.format(
+            os.path.abspath(slapd_pid_file).replace('/', r'\/'))
+        subprocess.check_output(
+            ['find', instance_path, '-type', 'f', '-exec', 'sed', '-i', replace_expression, '{}', ';'])
+        # Put the test data in.
+        cmd = ['slapadd', '-F', instance_path]
+        subprocess.check_output(
+            cmd, input='\n\n'.join(DEFAULT_ENTRIES).encode('ascii'), stderr=subprocess.STDOUT)
+        # Set up the server.
+        SLAPD_URLS='ldap://:{}/ ldaps://:{}/'.format(port, port + 1)
+        def can_connect_to_slapd():
+            return can_connect(('127.0.0.1', port)) and can_connect(('127.0.0.1', port + 1)) and can_connect(('127.0.0.1', port + 2))
+        def can_connect_to_saslauthd():
+            return can_connect(os.path.join(saslauthd_socket_path.name, 'mux'), socket.AF_UNIX)
+        slapd_proc = subprocess.Popen(['prlimit', '-n1024', 'slapd', '-F', instance_path, '-h', SLAPD_URLS, '-d', '0'])
+        saslauthd_conf_path = make_saslauthd_conf(port, instance_path)
+        test_env = {
+            "SEASTAR_LDAP_PORT" : str(port),
+            "SASLAUTHD_MUX_PATH" : os.path.join(saslauthd_socket_path.name, "mux")
+        }
+
+        saslauthd_proc = subprocess.Popen(
+            ['saslauthd', '-d', '-n', '1', '-a', 'ldap', '-O', saslauthd_conf_path, '-m', saslauthd_socket_path.name],
+            stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+        def finalize():
+            slapd_proc.terminate()
+            slapd_proc.wait() # Wait for slapd to remove slapd.pid, so it doesn't race with rmtree below.
+            saslauthd_proc.kill() # Somehow, invoking terminate() here also terminates toxiproxy-server. o_O
+            shutil.rmtree(instance_path)
+            saslauthd_socket_path.cleanup()
+            subprocess.check_output(['toxiproxy-cli', 'd', proxy_name])
+        try:
+            if not try_something_backoff(can_connect_to_slapd):
+                raise Exception('Unable to connect to slapd')
+            if not try_something_backoff(can_connect_to_saslauthd):
+                raise Exception('Unable to connect to saslauthd')
+        except:
+            finalize()
+            raise
+        return finalize, '--byte-limit={}'.format(byte_limit), test_env
 
 
 class CQLApprovalTest(Test):
@@ -1041,15 +1337,20 @@ class PythonTest(Test):
         try:
             cluster.before_test(self.uname)
             prepare_cql = self.suite.cfg.get("prepare_cql", None)
-            if prepare_cql:
-                next(iter(cluster.running.values())).control_connection.execute(prepare_cql)
+            if prepare_cql and not hasattr(cluster, 'prepare_cql_executed'):
+                cc = next(iter(cluster.running.values())).control_connection
+                if not isinstance(prepare_cql, collections.abc.Iterable):
+                    prepare_cql = [prepare_cql]
+                for stmt in prepare_cql:
+                    cc.execute(stmt)
+                cluster.prepare_cql_executed = True
             logger.info("Leasing Scylla cluster %s for test %s", cluster, self.uname)
             self.args.insert(0, "--host={}".format(cluster.endpoint()))
             self.is_before_test_ok = True
             cluster.take_log_savepoint()
             status = await run_test(self, options, env=self.suite.scylla_env)
-            if self.shortname in self.suite.dirties_cluster:
-                cluster.is_dirty = True
+            # if self.shortname in self.suite.dirties_cluster:
+            cluster.is_dirty = True
             cluster.after_test(self.uname, status)
             self.is_after_test_ok = True
             self.success = status
@@ -1087,7 +1388,7 @@ class TopologyTest(PythonTest):
         self._prepare_pytest_params(options)
 
         test_path = os.path.join(self.suite.options.tmpdir, self.mode)
-        async with get_cluster_manager(self.mode + '/' + self.uname, self.suite.clusters, test_path) as manager:
+        async with get_cluster_manager(self.uname, self.suite.clusters, test_path) as manager:
             self.args.insert(0, "--tmpdir={}".format(options.tmpdir))
             self.args.insert(0, "--manager-api={}".format(manager.sock_path))
             if options.artifacts_dir_url:
@@ -1207,17 +1508,31 @@ class TabularConsoleOutput:
             msg += " {:.2f}s".format(test.time_end - test.time_start)
             print(msg)
 
+toxiproxy_id_gen = 0
 
 async def run_test(test: Test, options: argparse.Namespace, gentle_kill=False, env=dict()) -> bool:
     """Run test program, return True if success else False"""
 
     with test.log_filename.open("wb") as log:
-
-        def report_error(error):
+        global toxiproxy_id_gen
+        toxiproxy_id = toxiproxy_id_gen
+        toxiproxy_id_gen += 1
+        ldap_port = 5000 + (toxiproxy_id * 3) % 55000
+        cleanup_fn = None
+        finject_desc = None
+        def report_error(error, failure_injection_desc = None):
             msg = "=== TEST.PY SUMMARY START ===\n"
             msg += "{}\n".format(error)
             msg += "=== TEST.PY SUMMARY END ===\n"
+            if failure_injection_desc is not None:
+                msg += 'failure injection: {}'.format(failure_injection_desc)
             log.write(msg.encode(encoding="UTF-8"))
+
+        try:
+            cleanup_fn, finject_desc, test_env = await test.setup(ldap_port, options)
+        except Exception as e:
+            report_error("Test setup failed ({})\n{}".format(str(e), traceback.format_exc()))
+            return False
         process = None
         stdout = None
         logging.info("Starting test %s: %s %s", test.uname, test.path, " ".join(test.args))
@@ -1233,6 +1548,19 @@ async def run_test(test: Test, options: argparse.Namespace, gentle_kill=False, e
             "detect_stack_use_after_return=1",
             os.getenv("ASAN_OPTIONS"),
         ]
+        ldap_instance_path = os.path.join(
+            os.path.abspath(os.path.join(options.tmpdir, test.mode, 'ldap_instances')),
+            str(ldap_port))
+        saslauthd_mux_path = os.path.join(ldap_instance_path, 'mux')
+        if options.manual_execution:
+            print('Please run the following shell command, then press <enter>:')
+            test_env_string = " ".join([f"{k}={v}" for k,v in test_env.items()])
+            print('{} {}'.format(
+                test_env_string, ' '.join([shlex.quote(e) for e in [test.path, *test.args]])))
+            input('-- press <enter> to continue --')
+            if cleanup_fn is not None:
+                cleanup_fn()
+            return True
         try:
             resource_gather = get_resource_gather(options.gather_metrics, test, options.tmpdir)
             resource_gather.make_cgroup()
@@ -1241,6 +1569,8 @@ async def run_test(test: Test, options: argparse.Namespace, gentle_kill=False, e
                 ":".join(filter(None, UBSAN_OPTIONS))).encode(encoding="UTF-8"))
             log.write("export ASAN_OPTIONS='{}'\n".format(
                 ":".join(filter(None, ASAN_OPTIONS))).encode(encoding="UTF-8"))
+            for k,v in test_env.items():
+                log.write(f"export {k}={v}\n".encode(encoding="UTF-8"))
             log.write("{} {}\n".format(test.path, " ".join(test.args)).encode(encoding="UTF-8"))
             log.write("=== TEST.PY TEST {} OUTPUT ===\n".format(test.uname).encode(encoding="UTF-8"))
             log.flush()
@@ -1256,11 +1586,8 @@ async def run_test(test: Test, options: argparse.Namespace, gentle_kill=False, e
             test_running_event = asyncio.Event()
             test_resource_watcher = resource_gather.cgroup_monitor(test_event=test_running_event)
 
-            process = await asyncio.create_subprocess_exec(
-                path, *args,
-                stderr=log,
-                stdout=log,
-                env=dict(os.environ,
+            test_env.update(
+                dict(os.environ,
                          UBSAN_OPTIONS=":".join(filter(None, UBSAN_OPTIONS)),
                          ASAN_OPTIONS=":".join(filter(None, ASAN_OPTIONS)),
                          # TMPDIR env variable is used by any seastar/scylla
@@ -1268,7 +1595,13 @@ async def run_test(test: Test, options: argparse.Namespace, gentle_kill=False, e
                          TMPDIR=os.path.join(options.tmpdir, test.mode),
                          SCYLLA_TEST_ENV='yes',
                          **env,
-                         ),
+                 )
+            )
+            process = await asyncio.create_subprocess_exec(
+                path, *args,
+                stderr=log,
+                stdout=log,
+                env=test_env,
                 preexec_fn=resource_gather.put_process_to_cgroup,
             )
             stdout, _ = await asyncio.wait_for(process.communicate(), options.timeout)
@@ -1312,6 +1645,9 @@ async def run_test(test: Test, options: argparse.Namespace, gentle_kill=False, e
                 report_error("Test was cancelled: the parent process is exiting")
         except Exception as e:
             report_error("Failed to run the test:\n{e}".format(e=e))
+        finally:
+            if cleanup_fn is not None:
+                cleanup_fn()
     return False
 
 
@@ -1410,6 +1746,10 @@ def parse_cmd_line() -> argparse.Namespace:
     parser.add_argument("--cluster-pool-size", action="store", default=None, type=int,
                         help="Set the pool_size for PythonTest and its descendants. Alternatively environment variable "
                              "CLUSTER_POOL_SIZE can be used to achieve the same")
+    parser.add_argument('--manual-execution', action='store_true', default=False,
+                        help='Let me manually run the test executable at the moment this script would run it')
+    parser.add_argument('--byte-limit', action="store", default=None, type=int,
+                        help="Specific byte limit for failure injection (random by default)")
     scylla_additional_options = parser.add_argument_group('Additional options for Scylla tests')
     scylla_additional_options.add_argument('--x-log2-compaction-groups', action="store", default="0", type=int,
                              help="Controls number of compaction groups to be used by Scylla tests. Value of 3 implies 8 groups.")
@@ -1446,7 +1786,7 @@ def parse_cmd_line() -> argparse.Namespace:
             # [1/1] List configured modes
             # debug release dev
             args.modes = re.sub(r'.* List configured modes\n(.*)\n', r'\1',
-                                out, 1, re.DOTALL).split("\n")[-1].split(' ')
+                                out, count=1, flags=re.DOTALL).split("\n")[-1].split(' ')
         except Exception:
             print(palette.fail("Failed to read output of `ninja mode_list`: please run ./configure.py first"))
             raise
@@ -1857,20 +2197,39 @@ async def main() -> int:
                          for t in TestSuite.all_tests()]))
         return 0
 
+    if options.manual_execution and TestSuite.test_count() > 1:
+        print('--manual-execution only supports running a single test, but multiple selected: {}'.format(
+            [t.path for t in TestSuite.tests()][:3])) # Print whole t.path; same shortname may be in different dirs.
+        return 1
+
     signaled = asyncio.Event()
     stop_event = asyncio.Event()
     resource_watcher = run_resource_watcher(options.gather_metrics, signaled, stop_event, options.tmpdir)
 
     setup_signal_handlers(asyncio.get_running_loop(), signaled)
 
+    tp_server = None
     try:
-        await run_all_tests(signaled, options)
-        stop_event.set()
-        async with asyncio.timeout(5):
-            await resource_watcher
-    except Exception as e:
-        print(palette.fail(e))
-        raise
+        if [t for t in TestSuite.all_tests() if isinstance(t, LdapTest)]:
+            tp_server = subprocess.Popen('toxiproxy-server', stderr=subprocess.DEVNULL)
+            def can_connect_to_toxiproxy():
+                return can_connect(('127.0.0.1', 8474))
+            if not try_something_backoff(can_connect_to_toxiproxy):
+                raise Exception('Could not connect to toxiproxy')
+
+        try:
+            logging.info('running all tests')
+            await run_all_tests(signaled, options)
+            logging.info('after running all tests')
+            stop_event.set()
+            async with asyncio.timeout(5):
+                await resource_watcher
+        except Exception as e:
+            print(palette.fail(e))
+            raise
+    finally:
+        if tp_server is not None:
+            tp_server.terminate()
 
     if signaled.is_set():
         return -signaled.signo      # type: ignore

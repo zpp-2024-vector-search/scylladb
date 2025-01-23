@@ -5,9 +5,10 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
+#include <seastar/core/when_all.hh>
 #include "list_users_statement.hh"
 #include "cql3/query_processor.hh"
 #include "cql3/query_options.hh"
@@ -17,7 +18,7 @@
 
 std::unique_ptr<cql3::statements::prepared_statement> cql3::statements::list_users_statement::prepare(
                 data_dictionary::database db, cql_stats& stats) {
-    return std::make_unique<prepared_statement>(::make_shared<list_users_statement>(*this));
+    return std::make_unique<prepared_statement>(audit_info(), ::make_shared<list_users_statement>(*this));
 }
 
 future<> cql3::statements::list_users_statement::check_access(query_processor& qp, const service::client_state& state) const {

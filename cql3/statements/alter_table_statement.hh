@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #pragma once
@@ -88,6 +88,8 @@ public:
                   std::unique_ptr<attributes::raw> attrs);
     
     virtual std::unique_ptr<prepared_statement> prepare(data_dictionary::database db, cql_stats& stats) override;
+
+    virtual audit::statement_category category() const override { return audit::statement_category::DDL; }
 };
 
 }

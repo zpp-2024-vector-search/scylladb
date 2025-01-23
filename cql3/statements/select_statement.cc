@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #include "cql3/statements/select_statement.hh"
@@ -499,7 +499,7 @@ select_statement::execute_without_checking_exception_message_aggregate_or_paged(
     auto per_partition_limit = get_limit(options, _per_partition_limit, true);
 
     if (aggregate || nonpaged_filtering) {
-        auto builder = cql3::selection::result_set_builder(*_selection, now, *_group_by_cell_indices, limit, per_partition_limit.value());
+        auto builder = cql3::selection::result_set_builder(*_selection, now, &options, *_group_by_cell_indices, limit, per_partition_limit.value());
         coordinator_result<void> result_void = co_await utils::result_do_until(
                 [&p, &builder, limit] {
                     return p->is_exhausted() || (limit < builder.result_set_size());
@@ -916,7 +916,7 @@ select_statement::process_results_complex(foreign_ptr<lw_shared_ptr<query::resul
                                   lw_shared_ptr<query::read_command> cmd,
                                   const query_options& options,
                                   gc_clock::time_point now) const {
-    cql3::selection::result_set_builder builder(*_selection, now);
+    cql3::selection::result_set_builder builder(*_selection, now, &options);
     co_return co_await builder.with_thread_if_needed([&] {
         if (_restrictions_need_filtering) {
             results->ensure_counts();
@@ -1192,7 +1192,7 @@ indexed_table_select_statement::do_execute(query_processor& qp,
     // the paging state between requesting data from replicas.
     const bool aggregate = _selection->is_aggregate() || has_group_by();
     if (aggregate) {
-        cql3::selection::result_set_builder builder(*_selection, now, *_group_by_cell_indices);
+        cql3::selection::result_set_builder builder(*_selection, now, &options, *_group_by_cell_indices);
         std::unique_ptr<cql3::query_options> internal_options = std::make_unique<cql3::query_options>(cql3::query_options(options));
         stop_iteration stop;
         // page size is set to the internal count page size, regardless of the user-provided value
@@ -1371,9 +1371,9 @@ indexed_table_select_statement::read_posting_list(query_processor& qp,
     int32_t page_size = options.get_page_size();
     if (page_size <= 0 || !service::pager::query_pagers::may_need_paging(*_view_schema, page_size, *cmd, partition_ranges)) {
         return qp.proxy().query_result(_view_schema, cmd, std::move(partition_ranges), options.get_consistency(), {timeout, state.get_permit(), state.get_client_state(), state.get_trace_state()})
-        .then(utils::result_wrap([this, now, selection = std::move(selection), partition_slice = std::move(partition_slice)] (service::storage_proxy::coordinator_query_result qr)
+        .then(utils::result_wrap([this, now, &options, selection = std::move(selection), partition_slice = std::move(partition_slice)] (service::storage_proxy::coordinator_query_result qr)
                 -> coordinator_result<::shared_ptr<cql_transport::messages::result_message::rows>> {
-            cql3::selection::result_set_builder builder(*selection, now);
+            cql3::selection::result_set_builder builder(*selection, now, &options);
             query::result_view::consume(*qr.query_result,
                                         std::move(partition_slice),
                                         cql3::selection::result_set_builder::visitor(builder, *_view_schema, *selection));
@@ -1799,8 +1799,8 @@ mutation_fragments_select_statement::do_execute(query_processor& qp, service::qu
                     *command, key_ranges))) {
         return do_query(erm_keepalive, {}, qp.proxy(), _schema, command, std::move(key_ranges), cl,
                 {timeout, state.get_permit(), state.get_client_state(), state.get_trace_state(), {}, {}})
-        .then(wrap_result_to_error_message([this, erm_keepalive, now, slice = command->slice] (service::storage_proxy_coordinator_query_result&& qr) mutable {
-            cql3::selection::result_set_builder builder(*_selection, now);
+        .then(wrap_result_to_error_message([this, erm_keepalive, now, &options, slice = command->slice] (service::storage_proxy_coordinator_query_result&& qr) mutable {
+            cql3::selection::result_set_builder builder(*_selection, now, &options);
             query::result_view::consume(*qr.query_result, std::move(slice),
                     cql3::selection::result_set_builder::visitor(builder, *_schema, *_selection));
             auto msg = ::make_shared<cql_transport::messages::result_message::rows>(result(builder.build()));
@@ -1820,7 +1820,7 @@ mutation_fragments_select_statement::do_execute(query_processor& qp, service::qu
                 throw exceptions::invalid_request_exception(seastar::format(
                             "Moving between coordinators is not allowed in SELECT FROM MUTATION_FRAGMENTS() statements, last page's coordinator was {}{}",
                             last_host,
-                            last_node ? fmt::format("({})", last_node->endpoint()) : ""));
+                            last_node ? fmt::format("({})", last_node->host_id()) : ""));
             }
         }
     }
@@ -1879,6 +1879,10 @@ namespace raw {
 static void validate_attrs(const cql3::attributes::raw& attrs) {
     SCYLLA_ASSERT(!attrs.timestamp.has_value());
     SCYLLA_ASSERT(!attrs.time_to_live.has_value());
+}
+
+audit::statement_category select_statement::category() const {
+    return audit::statement_category::QUERY;
 }
 
 select_statement::select_statement(cf_name cf_name,
@@ -1980,6 +1984,10 @@ std::unique_ptr<prepared_statement> select_statement::prepare(data_dictionary::d
             }
             prepared_selectors = selection::raw_selector::to_prepared_selectors(select_all, *schema, db, keyspace());
         }
+    }
+
+    for (auto& ps : prepared_selectors) {
+        expr::fill_prepare_context(ps.expr, ctx);
     }
 
     for (auto& ps : prepared_selectors) {
@@ -2163,8 +2171,9 @@ std::unique_ptr<prepared_statement> select_statement::prepare(data_dictionary::d
     }
 
     auto partition_key_bind_indices = ctx.get_partition_key_bind_indexes(*schema);
+
     stmt->_may_use_token_aware_routing = partition_key_bind_indices.size() != 0;
-    return make_unique<prepared_statement>(std::move(stmt), ctx, std::move(partition_key_bind_indices), std::move(warnings));
+    return make_unique<prepared_statement>(audit_info(), std::move(stmt), ctx, std::move(partition_key_bind_indices), std::move(warnings));
 }
 
 ::shared_ptr<restrictions::statement_restrictions>

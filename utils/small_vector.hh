@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -249,6 +249,10 @@ public:
         if (__builtin_expect(!uses_internal_storage(), false)) {
             std::free(_begin);
         }
+    }
+
+    static constexpr size_t internal_capacity() noexcept {
+        return N;
     }
 
     size_t external_memory_usage() const {

@@ -3,21 +3,13 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
-#include "bytes.hh"
+#include "bytes_fwd.hh"
 #include <seastar/core/future.hh>
-#include <seastar/core/sstring.hh>
-#include "redis/request.hh"
 #include "redis/reply.hh"
-#include "db/consistency_level_type.hh"
-#include "db/timeout_clock.hh"
-#include "db/system_keyspace.hh"
-#include "keys.hh"
-#include "timestamp.hh"
-#include <unordered_map>
 
 class service_permit;
 

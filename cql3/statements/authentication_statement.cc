@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #include "authentication_statement.hh"
@@ -27,4 +27,8 @@ future<> cql3::statements::authentication_statement::check_access(query_processo
 
 bool cql3::statements::authentication_altering_statement::needs_guard(query_processor& qp, service::query_state&) const {
     return !auth::legacy_mode(qp);
+}
+
+audit::statement_category cql3::statements::authentication_statement::category() const {
+    return audit::statement_category::DCL;
 }

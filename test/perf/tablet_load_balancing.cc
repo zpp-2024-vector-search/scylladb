@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <fmt/ranges.h>
@@ -243,7 +243,6 @@ future<results> test_load_balancing_with_many_tables(params p, bool tablet_aware
         };
 
         auto add_host_to_topology = [&] (token_metadata& tm, int i) -> future<> {
-            tm.update_host_id(hosts[i], ips[i]);
             tm.update_topology(hosts[i], rack1, node::state::normal, shard_count);
             co_await tm.update_normal_tokens(std::unordered_set{token(tests::d2t(float(i) / hosts.size()))}, hosts[i]);
         };

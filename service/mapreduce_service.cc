@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "service/mapreduce_service.hh"
@@ -443,6 +443,7 @@ future<query::mapreduce_result> mapreduce_service::execute_on_this_shard(
     auto rs_builder = cql3::selection::result_set_builder(
         *selection,
         now,
+        nullptr,
         std::vector<size_t>() // Represents empty GROUP BY indices.
     );
 

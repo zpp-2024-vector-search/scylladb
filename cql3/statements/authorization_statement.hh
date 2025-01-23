@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #pragma once
@@ -33,6 +33,10 @@ public:
 
 protected:
     static void maybe_correct_resource(auth::resource&, const service::client_state&, query_processor&);
+    virtual audit::statement_category category() const override;
+    virtual audit::audit_info_ptr audit_info() const override {
+        return audit::audit::create_audit_info(category(), sstring(), sstring());
+    }
 };
 
 class authorization_altering_statement : public authorization_statement {

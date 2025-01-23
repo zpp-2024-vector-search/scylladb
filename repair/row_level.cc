@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <exception>
@@ -2317,7 +2317,7 @@ future<repair_flush_hints_batchlog_response> repair_service::repair_flush_hints_
     auto flush_time = now;
     if (cache_disabled || (now - _flush_hints_batchlog_time > cache_time)) {
         // Empty targets meants all nodes
-        db::hints::sync_point sync_point = co_await _sp.local().create_hint_sync_point(std::vector<gms::inet_address>{});
+        db::hints::sync_point sync_point = co_await _sp.local().create_hint_sync_point(std::vector<locator::host_id>{});
         lowres_clock::time_point deadline = lowres_clock::now() + req.hints_timeout;
         try {
             bool bm_throw = utils::get_local_injector().enter("repair_flush_hints_batchlog_handler_bm_uninitialized");
@@ -2992,6 +2992,15 @@ private:
         if (!_shard_task.hints_batchlog_flushed()) {
             co_return;
         }
+
+        // The tablet repair time for tombstone gc will be updated when the
+        // system.tablet.repair_time is updated.
+        if (_is_tablet && _shard_task.sched_by_scheduler) {
+            rlogger.debug("repair[{}]: Skipped to update system.repair_history for tablet repair scheduled by scheduler total_rf={} repaired_replicas={} local={} peers={}",
+                    _shard_task.global_repair_id.uuid(), _shard_task.total_rf, repaired_replicas, my_address, _all_live_peer_nodes);
+            co_return;
+        }
+
         repair_service& rs = _shard_task.rs;
         std::optional<gc_clock::time_point> repair_time_opt = co_await rs.update_history(_shard_task.global_repair_id.uuid(), _table_id, _range, _start_time, _is_tablet);
         if (!repair_time_opt) {
@@ -3282,6 +3291,7 @@ future<> repair_service::stop() {
         rlogger.debug("Unregistering gossiper helper");
         co_await _gossiper.local().unregister_(_gossip_helper);
     }
+    co_await async_gate().close();
     _stopped = true;
     rlogger.info("Stopped repair_service");
   } catch (...) {

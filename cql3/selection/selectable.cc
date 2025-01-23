@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "cql3/query_options.hh"
@@ -41,7 +41,7 @@ selectable_processes_selection(const expr::expression& selectable) {
             on_internal_error(slogger, "no way to express 'SELECT a binop b' in the grammar yet");
         },
         [] (const expr::subscript&) -> bool {
-            on_internal_error(slogger, "no way to express 'SELECT a[b]' in the grammar yet");
+            return true;
         },
         [&] (const expr::column_value& column) -> bool {
             return false;

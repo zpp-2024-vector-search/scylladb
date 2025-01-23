@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 #include "server.hh"
 
@@ -13,6 +13,7 @@
 #include <boost/range/adaptor/map.hpp>
 #include <boost/range/algorithm/copy.hpp>
 #include <boost/range/join.hpp>
+#include <boost/lexical_cast.hpp>
 #include <map>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/future-util.hh>
@@ -857,6 +858,10 @@ future<add_entry_reply> server_impl::execute_modify_config(server_id from,
 }
 
 future<> server_impl::modify_config(std::vector<config_member> add, std::vector<server_id> del, seastar::abort_source* as) {
+    utils::get_local_injector().inject("raft/throw_commit_status_unknown_in_modify_config", [] {
+        throw raft::commit_status_unknown();
+    });
+
     if (!_config.enable_forwarding) {
         const auto leader = _fsm->current_leader();
         if (leader != _id) {

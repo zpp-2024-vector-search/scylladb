@@ -3,13 +3,13 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 
-#include <fmt/format.h>
-#include <fmt/std.h>
+#include <fmt/core.h>
+#include <compare>
 
 template <> struct fmt::formatter<std::strong_ordering> : fmt::formatter<string_view> {
     auto format(std::strong_ordering, fmt::format_context& ctx) const -> decltype(ctx.out());

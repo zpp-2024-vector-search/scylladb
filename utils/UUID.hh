@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 // This class is the parts of java.util.UUID that we need
@@ -17,9 +17,7 @@
 #include <compare>
 
 #include <seastar/core/sstring.hh>
-#include <seastar/core/format.hh>
-#include <seastar/net/byteorder.hh>
-#include "bytes.hh"
+#include "bytes_fwd.hh"
 #include "utils/assert.hh"
 #include "utils/hashing.hh"
 #include "utils/serialization.hh"

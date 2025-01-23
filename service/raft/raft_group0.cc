@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 #include <iterator>
 #include <source_location>
@@ -33,6 +33,7 @@
 #include <seastar/core/smp.hh>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/coroutine.hh>
+#include <seastar/core/with_scheduling_group.hh>
 #include <seastar/coroutine/as_future.hh>
 #include <seastar/util/log.hh>
 #include <seastar/util/defer.hh>
@@ -94,6 +95,44 @@ namespace service {
 
 static logging::logger group0_log("raft_group0");
 static logging::logger upgrade_log("raft_group0_upgrade");
+
+namespace {
+
+constexpr std::chrono::milliseconds default_retry_period{10};   // 10 milliseconds
+constexpr std::chrono::seconds default_max_retry_period{1};     // 1 second
+constexpr std::chrono::seconds default_max_total_timeout{300};  // 5 minutes
+
+enum class operation_result : uint8_t { success, failure };
+
+future<> run_op_with_retry(abort_source& as, auto&& op, const sstring op_name,
+        const std::optional<std::chrono::seconds> max_total_timeout = default_max_total_timeout, std::chrono::milliseconds retry_period = default_retry_period,
+        const std::chrono::seconds max_retry_period = default_max_retry_period) {
+    const auto start = lowres_clock::now();
+    while (true) {
+        as.check();
+        const operation_result result = co_await op();
+        if (result == operation_result::success) {
+            co_return;
+        }
+
+        if (max_total_timeout) {
+            const auto elapsed = lowres_clock::now() - start;
+            if (elapsed > *max_total_timeout) {
+                on_internal_error(group0_log,
+                        format("{} timed out after retrying for {} seconds", op_name, std::chrono::duration_cast<std::chrono::seconds>(elapsed).count()));
+            }
+        }
+
+        retry_period *= 2;
+        if (retry_period > max_retry_period) {
+            retry_period = max_retry_period;
+        }
+        co_await sleep_abortable(retry_period, as);
+    }
+    std::unreachable();
+}
+
+} // namespace
 
 // TODO: change the links from master to stable/5.2 after 5.2 is released
 const char* const raft_upgrade_doc = "https://docs.scylladb.com/master/architecture/raft.html#verifying-that-the-internal-raft-upgrade-procedure-finished-successfully";
@@ -433,12 +472,21 @@ future<> raft_group0::leadership_monitor_fiber() {
                 co_await group0_server().wait_for_state_change(&_leadership_monitor_as);
             }
             group0_log.info("gaining leadership");
+            _leadership_observable.set(true);
             co_await group0_server().wait_for_state_change(&_leadership_monitor_as);
             group0_log.info("losing leadership");
+            _leadership_observable.set(false);
         }
     } catch (...) {
         group0_log.debug("leadership_monitor_fiber aborted with {}", std::current_exception());
     }
+}
+
+utils::observer<bool> raft_group0::observe_leadership(std::function<void(bool)> cb) {
+    if (_leadership_observable.get()) {
+        cb(true);
+    }
+    return _leadership_observable.observe(cb);
 }
 
 future<> raft_group0::join_group0(std::vector<gms::inet_address> seeds, shared_ptr<service::group0_handshaker> handshaker, service::storage_service& ss, cql3::query_processor& qp, service::migration_manager& mm,
@@ -538,17 +586,17 @@ future<> raft_group0::join_group0(std::vector<gms::inet_address> seeds, shared_p
     group0_log.info("server {} joined group 0 with group id {}", my_id, group0_id);
 }
 
-shared_ptr<service::group0_handshaker> raft_group0::make_legacy_handshaker(bool can_vote) {
+shared_ptr<service::group0_handshaker> raft_group0::make_legacy_handshaker(can_vote can_vote) {
     struct legacy_handshaker : public group0_handshaker {
         service::raft_group0& _group0;
         netw::messaging_service& _ms;
-        bool _can_vote;
+        service::can_vote _can_vote;
 
-        legacy_handshaker(service::raft_group0& group0, netw::messaging_service& ms, bool can_vote)
-                : _group0(group0)
-                , _ms(ms)
-                , _can_vote(can_vote)
-        {}
+        legacy_handshaker(service::raft_group0& group0, netw::messaging_service& ms, service::can_vote can_vote)
+            : _group0(group0)
+            , _ms(ms)
+            , _can_vote(can_vote) {
+        }
 
         future<> pre_server_start(const group0_info& info) override {
             // Nothing to do in this step
@@ -560,7 +608,8 @@ shared_ptr<service::group0_handshaker> raft_group0::make_legacy_handshaker(bool 
             auto my_id = _group0.load_my_id();
             raft::server_address my_addr{my_id, {}};
             try {
-                co_await ser::group0_rpc_verbs::send_group0_modify_config(&_ms, locator::host_id{g0_info.id.uuid()}, timeout, g0_info.group0_id, {{my_addr, _can_vote}}, {});
+                co_await ser::group0_rpc_verbs::send_group0_modify_config(
+                        &_ms, locator::host_id{g0_info.id.uuid()}, timeout, g0_info.group0_id, {{my_addr, static_cast<bool>(_can_vote)}}, {});
                 co_return true;
             } catch (std::runtime_error& e) {
                 group0_log.warn("failed to modify config at peer {}: {}. Retrying.", g0_info.id, e.what());
@@ -732,7 +781,15 @@ future<> raft_group0::finish_setup_after_join(service::storage_service& ss, cql3
             // Just bootstrapped and joined as non-voter. Become a voter.
             auto pause_shutdown = _shutdown_gate.hold();
             raft::server_address my_addr{my_id, {}};
-            co_await _raft_gr.group0().modify_config({{my_addr, true}}, {}, &_abort_source);
+            co_await run_op_with_retry(_abort_source, [this, my_addr]() -> future<operation_result> {
+                try {
+                    co_await _raft_gr.group0().modify_config({{my_addr, true}}, {}, &_abort_source);
+                } catch (const raft::commit_status_unknown& e) {
+                    group0_log.info("finish_setup_after_join({}): modify_config returned \"{}\", retrying", my_addr, e);
+                    co_return operation_result::failure;
+                }
+                co_return operation_result::success;
+            }, "finish_setup_after_join->modify_config", {});
             group0_log.info("finish_setup_after_join: became a group 0 voter.");
 
             // No need to run `upgrade_to_group0()` since we must have bootstrapped with Raft
@@ -786,30 +843,31 @@ future<> raft_group0::become_nonvoter(abort_source& as, std::optional<raft_timeo
     auto my_id = load_my_id();
     group0_log.info("becoming a non-voter (my id = {})...", my_id);
 
-    co_await make_raft_config_nonvoter({my_id}, as, timeout);
+    co_await modify_raft_voter_status({my_id}, can_vote::no, as, timeout);
     group0_log.info("became a non-voter.", my_id);
 }
 
-future<> raft_group0::make_nonvoter(raft::server_id node, abort_source& as, std::optional<raft_timeout> timeout) {
-    co_return co_await make_nonvoters({node}, as, timeout);
+future<> raft_group0::set_voter_status(raft::server_id node, can_vote can_vote, abort_source& as, std::optional<raft_timeout> timeout) {
+    co_return co_await set_voters_status({node}, can_vote, as, timeout);
 }
 
-future<> raft_group0::make_nonvoters(const std::unordered_set<raft::server_id>& nodes, abort_source& as,
-        std::optional<raft_timeout> timeout)
-{
+future<> raft_group0::set_voters_status(
+        const std::unordered_set<raft::server_id>& nodes, can_vote can_vote, abort_source& as, std::optional<raft_timeout> timeout) {
     if (!(co_await raft_upgrade_complete())) {
-        on_internal_error(group0_log, "called make_nonvoters before Raft upgrade finished");
+        on_internal_error(group0_log, "called set_voter_status before Raft upgrade finished");
     }
 
     if (nodes.empty()) {
         co_return;
     }
 
-    group0_log.info("making servers {} non-voters...", nodes);
+    const std::string_view status_str = can_vote ? "voters" : "non-voters";
 
-    co_await make_raft_config_nonvoter(nodes, as, timeout);
+    group0_log.info("making servers {} {}...", nodes, status_str);
 
-    group0_log.info("servers {} are now non-voters.", nodes);
+    co_await modify_raft_voter_status(nodes, can_vote, as, timeout);
+
+    group0_log.info("servers {} are now {}.", nodes, status_str);
 }
 
 future<> raft_group0::leave_group0() {
@@ -895,52 +953,37 @@ future<bool> raft_group0::wait_for_raft() {
     co_return true;
 }
 
-future<> raft_group0::make_raft_config_nonvoter(const std::unordered_set<raft::server_id>& ids, abort_source& as,
-        std::optional<raft_timeout> timeout)
-{
-    static constexpr auto max_retry_period = std::chrono::seconds{1};
-    auto retry_period = std::chrono::milliseconds{10};
-
-    while (true) {
-        as.check();
-
+future<> raft_group0::modify_raft_voter_status(
+        const std::unordered_set<raft::server_id>& ids, can_vote can_vote, abort_source& as, std::optional<raft_timeout> timeout) {
+    co_await run_op_with_retry(as, [this, &ids, timeout, can_vote, &as]() -> future<operation_result> {
         std::vector<raft::config_member> add;
         add.reserve(ids.size());
-        std::transform(ids.begin(), ids.end(), std::back_inserter(add),
-        [] (raft::server_id id) { return raft::config_member{{id, {}}, false}; });
+        std::transform(ids.begin(), ids.end(), std::back_inserter(add), [can_vote](raft::server_id id) {
+            return raft::config_member{{id, {}}, static_cast<bool>(can_vote)};
+        });
 
         try {
             co_await _raft_gr.group0_with_timeouts().modify_config(std::move(add), {}, &as, timeout);
-            co_return;
         } catch (const raft::commit_status_unknown& e) {
-            group0_log.info("make_raft_config_nonvoter({}): modify_config returned \"{}\", retrying", ids, e);
+            group0_log.info("modify_raft_voter_config({}): modify_config returned \"{}\", retrying", ids, e);
+            co_return operation_result::failure;
         }
-        retry_period *= 2;
-        if (retry_period > max_retry_period) {
-            retry_period = max_retry_period;
-        }
-        co_await sleep_abortable(retry_period, as);
-    }
+        co_return operation_result::success;
+    }, "modify_raft_voter_status->modify_config");
+    co_return;
 }
 
 future<> raft_group0::remove_from_raft_config(raft::server_id id) {
-    static constexpr auto max_retry_period = std::chrono::seconds{1};
-    auto retry_period = std::chrono::milliseconds{10};
-
-    // TODO: add a timeout mechanism? This could get stuck (and _abort_source is only called on shutdown).
-    while (true) {
+    co_await run_op_with_retry(_abort_source, [this, id]() -> future<operation_result> {
         try {
-            co_await _raft_gr.group0().modify_config({}, {id}, &_abort_source);
-            break;
+            co_await _raft_gr.group0_with_timeouts().modify_config({}, {id}, &_abort_source, raft_timeout{});
         } catch (const raft::commit_status_unknown& e) {
             group0_log.info("remove_from_raft_config({}): modify_config returned \"{}\", retrying", id, e);
+            co_return operation_result::failure;
         }
-        retry_period *= 2;
-        if (retry_period > max_retry_period) {
-            retry_period = max_retry_period;
-        }
-        co_await sleep_abortable(retry_period, _abort_source);
-    }
+        co_return operation_result::success;
+    }, "remove_from_raft_config->modify_config");
+    co_return;
 }
 
 bool raft_group0::joined_group0() const {
@@ -1640,7 +1683,7 @@ future<> raft_group0::do_upgrade_to_group0(group0_upgrade_state start_state, ser
 
     if (!joined_group0()) {
         upgrade_log.info("Joining group 0...");
-        auto handshaker = make_legacy_handshaker(true); // Voter
+        auto handshaker = make_legacy_handshaker(can_vote::yes); // Voter
         co_await join_group0(co_await _sys_ks.load_peers(), std::move(handshaker), ss, qp, mm, _sys_ks, topology_change_enabled);
     } else {
         upgrade_log.info(

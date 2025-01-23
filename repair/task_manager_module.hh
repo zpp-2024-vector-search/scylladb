@@ -3,12 +3,11 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 
-#include "gms/inet_address.hh"
 #include "node_ops/node_ops_ctl.hh"
 #include "repair/repair.hh"
 #include "streaming/stream_reason.hh"
@@ -50,8 +49,9 @@ private:
     std::unordered_set<locator::host_id> _ignore_nodes;
     bool _small_table_optimization;
     std::optional<int> _ranges_parallelism;
+    gms::gossiper& _gossiper;
 public:
-    user_requested_repair_task_impl(tasks::task_manager::module_ptr module, repair_uniq_id id, std::string keyspace, std::string entity, lw_shared_ptr<locator::global_vnode_effective_replication_map> germs, std::vector<sstring> cfs, dht::token_range_vector ranges, std::vector<sstring> hosts, std::vector<sstring> data_centers, std::unordered_set<locator::host_id> ignore_nodes, bool small_table_optimization, std::optional<int> ranges_parallelism) noexcept
+    user_requested_repair_task_impl(tasks::task_manager::module_ptr module, repair_uniq_id id, std::string keyspace, std::string entity, lw_shared_ptr<locator::global_vnode_effective_replication_map> germs, std::vector<sstring> cfs, dht::token_range_vector ranges, std::vector<sstring> hosts, std::vector<sstring> data_centers, std::unordered_set<locator::host_id> ignore_nodes, bool small_table_optimization, std::optional<int> ranges_parallelism, gms::gossiper& gossiper) noexcept
         : repair_task_impl(module, id.uuid(), id.id, "keyspace", std::move(keyspace), "", std::move(entity), tasks::task_id::create_null_id(), streaming::stream_reason::repair)
         , _germs(germs)
         , _cfs(std::move(cfs))
@@ -61,6 +61,7 @@ public:
         , _ignore_nodes(std::move(ignore_nodes))
         , _small_table_optimization(small_table_optimization)
         , _ranges_parallelism(ranges_parallelism)
+        , _gossiper(gossiper)
     {}
 
     virtual tasks::is_abortable is_abortable() const noexcept override {
@@ -112,6 +113,9 @@ private:
     optimized_optional<abort_source::subscription> _abort_subscription;
     std::optional<int> _ranges_parallelism;
     size_t _metas_size = 0;
+    gc_clock::time_point _flush_time;
+public:
+    bool sched_by_scheduler = false;
 public:
     tablet_repair_task_impl(tasks::task_manager::module_ptr module, repair_uniq_id id, sstring keyspace, std::vector<sstring> tables, streaming::stream_reason reason, std::vector<tablet_repair_task_meta> metas, std::optional<int> ranges_parallelism)
         : repair_task_impl(module, id.uuid(), id.id, "keyspace", keyspace, "", "", tasks::task_id::create_null_id(), reason)
@@ -125,6 +129,8 @@ public:
     virtual tasks::is_abortable is_abortable() const noexcept override {
         return tasks::is_abortable(!_abort_subscription);
     }
+
+    gc_clock::time_point get_flush_time() const { return _flush_time; }
 
     tasks::is_user_task is_user_task() const noexcept override;
     virtual void release_resources() noexcept override;
@@ -170,6 +176,8 @@ private:
     uint64_t _ranges_complete = 0;
     gc_clock::time_point _flush_time;
 public:
+    bool sched_by_scheduler = false;
+public:
     shard_repair_task_impl(tasks::task_manager::module_ptr module,
             tasks::task_id id,
             const sstring& keyspace,
@@ -185,10 +193,12 @@ public:
             bool hints_batchlog_flushed,
             bool small_table_optimization,
             std::optional<int> ranges_parallelism,
-            gc_clock::time_point flush_time);
+            gc_clock::time_point flush_time,
+            bool sched_by_scheduler = false);
     void check_failed_ranges();
     void check_in_abort_or_shutdown();
     repair_neighbors get_repair_neighbors(const dht::token_range& range);
+    gc_clock::time_point get_flush_time() const { return _flush_time; }
     void update_statistics(const repair_stats& stats) {
         _stats.add(stats);
     }

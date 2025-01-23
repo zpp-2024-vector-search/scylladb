@@ -1,13 +1,14 @@
 #
 # Copyright (C) 2022-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 # This file configures pytest for all tests in this directory, and also
 # defines common test fixtures for all of them to use
 import pathlib
 import ssl
 import platform
+import urllib.parse
 from functools import partial
 from typing import List, Optional, Dict
 from test.pylib.random_tables import RandomTables
@@ -185,11 +186,11 @@ async def manager(request, manager_internal, record_property, build_mode):
                         )
     test_log = suite_testpy_log.parent / f"{suite_testpy_log.stem}.{test_case_name}.log"
     # this should be consistent with scylla_cluster.py handler name in _before_test method
-    test_py_log_test = suite_testpy_log.parent / f"{test_case_name}.log"
+    test_py_log_test = suite_testpy_log.parent / f"{suite_testpy_log.stem}_{test_case_name}_cluster.log"
 
-    manager_internal = manager_internal()  # set up client object in fixture with scope function
-    await manager_internal.before_test(test_case_name, test_log)
-    yield manager_internal
+    manager_client = manager_internal()  # set up client object in fixture with scope function
+    await manager_client.before_test(test_case_name, test_log)
+    yield manager_client
     # `request.node.stash` contains a report stored in `pytest_runtest_makereport` from where we can retrieve
     # test failure.
     report = request.node.stash[PHASE_REPORT_KEY]
@@ -200,7 +201,7 @@ async def manager(request, manager_internal, record_property, build_mode):
         # Then add property to the XML report with the path to the directory, so it can be visible in Jenkins
         failed_test_dir_path = tmp_dir / build_mode / "failed_test" / f"{test_case_name}"
         failed_test_dir_path.mkdir(parents=True, exist_ok=True)
-        await manager_internal.gather_related_logs(
+        await manager_client.gather_related_logs(
             failed_test_dir_path,
             {'pytest.log': test_log, 'test_py.log': test_py_log_test}
         )
@@ -209,13 +210,14 @@ async def manager(request, manager_internal, record_property, build_mode):
         if request.config.getoption('artifacts_dir_url') is not None:
             # get the relative path to the tmpdir for the failed directory
             dir_path_relative = f"{failed_test_dir_path.as_posix()[failed_test_dir_path.as_posix().find('testlog'):]}"
-            full_url = f"<a href={request.config.getoption('artifacts_dir_url')}/{dir_path_relative}>failed_test_logs</a>"
-            record_property("TEST_LOGS", full_url)
+            full_url = urllib.parse.urljoin(request.config.getoption('artifacts_dir_url') + '/',
+                                            urllib.parse.quote(dir_path_relative))
+            record_property("TEST_LOGS", f"<a href={full_url}>failed_test_logs</a>")
 
-    cluster_status = await manager_internal.after_test(test_case_name, not failed)
-    await manager_internal.stop()  # Stop client session and close driver after each test
+    cluster_status = await manager_client.after_test(test_case_name, not failed)
+    await manager_client.stop()  # Stop client session and close driver after each test
     if cluster_status["server_broken"]:
-        pytest.fail(f"test case {test_case_name} leave unfinished tasks on Scylla server. Server marked as broken")
+        pytest.fail(f"test case {test_case_name} leave unfinished tasks on Scylla server. Server marked as broken, server_broken_reason: {cluster_status["message"]}")
 
 # "cql" fixture: set up client object for communicating with the CQL API.
 # Since connection is managed by manager just return that object

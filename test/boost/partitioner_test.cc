@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <limits>
@@ -11,6 +11,7 @@
 #include <boost/range/combine.hpp>
 #include <boost/test/tools/old/interface.hpp>
 #include <fmt/ranges.h>
+#include <fmt/std.h>
 #include "test/lib/scylla_test_case.hh"
 
 #include "dht/token.hh"
@@ -191,9 +192,9 @@ SEASTAR_THREAD_TEST_CASE(test_ring_position_ordering) {
 
     testlog.info("Keys: {}", keys);
 
-    auto positions = boost::copy_range<std::vector<dht::ring_position>>(keys);
-    auto ext_positions = boost::copy_range<std::vector<dht::ring_position_ext>>(keys);
-    auto views = boost::copy_range<std::vector<dht::ring_position_view>>(positions);
+    auto positions = keys | std::ranges::to<std::vector<dht::ring_position>>();
+    auto ext_positions = keys | std::ranges::to<std::vector<dht::ring_position_ext>>();
+    auto views = positions | std::ranges::to<std::vector<dht::ring_position_view>>();
 
     total_order_check<dht::ring_position_comparator, dht::ring_position, dht::ring_position_view, dht::decorated_key>(cmp)
       .next(dht::ring_position_view::min())

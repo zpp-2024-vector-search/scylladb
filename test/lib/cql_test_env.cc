@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <iterator>
@@ -52,6 +52,7 @@
 #include "message/messaging_service.hh"
 #include "gms/gossiper.hh"
 #include "gms/feature_service.hh"
+#include "service/qos/service_level_controller.hh"
 #include "db/system_keyspace.hh"
 #include "db/system_distributed_keyspace.hh"
 #include "db/sstables-format-selector.hh"
@@ -68,6 +69,7 @@
 #include "sstables/sstables_manager.hh"
 #include "init.hh"
 #include "lang/manager.hh"
+#include "utils/disk_space_monitor.hh"
 
 #include <sys/time.h>
 #include <sys/resource.h>
@@ -138,6 +140,7 @@ private:
     sharded<service::migration_notifier> _mnotifier;
     sharded<qos::service_level_controller> _sl_controller;
     sharded<service::topology_state_machine> _topology_state_machine;
+    sharded<utils::walltime_compressor_tracker> _compressor_tracker;
     sharded<service::migration_manager> _mm;
     sharded<db::batchlog_manager> _batchlog_manager;
     sharded<gms::gossiper> _gossiper;
@@ -153,6 +156,7 @@ private:
     sharded<locator::shared_token_metadata> _token_metadata;
     sharded<locator::effective_replication_map_factory> _erm_factory;
     sharded<sstables::directory_semaphore> _sst_dir_semaphore;
+    std::optional<utils::disk_space_monitor> _disk_space_monitor_shard0;
     sharded<lang::manager> _lang_manager;
     sharded<cql3::cql_config> _cql_config;
     sharded<service::endpoint_lifecycle_notifier> _elc_notif;
@@ -171,8 +175,8 @@ private:
     struct core_local_state {
         service::client_state client_state;
 
-        core_local_state(auth::service& auth_service, qos::service_level_controller& sl_controller)
-            : client_state(service::client_state::external_tag{}, auth_service, &sl_controller, infinite_timeout_config)
+        core_local_state(auth::service& auth_service, qos::service_level_controller& sl_controller, timeout_config timeout)
+            : client_state(service::client_state::external_tag{}, auth_service, &sl_controller, timeout)
         {
             client_state.set_login(auth::authenticated_user(testing_superuser));
         }
@@ -403,6 +407,10 @@ public:
         return _task_manager;
     }
 
+    virtual sharded<locator::shared_token_metadata>& get_shared_token_metadata() override {
+        return _token_metadata;
+    }
+
     virtual future<> refresh_client_state() override {
         return _core_local.invoke_on_all([] (core_local_state& state) {
             return state.client_state.maybe_update_per_service_level_params();
@@ -574,6 +582,16 @@ private:
                 _task_manager.stop().get();
             });
 
+            utils::disk_space_monitor::config dsm_cfg = {
+                .sched_group = scheduling_groups.streaming_scheduling_group,
+                .normal_polling_interval = cfg->disk_space_monitor_normal_polling_interval_in_seconds,
+                .high_polling_interval = cfg->disk_space_monitor_high_polling_interval_in_seconds,
+                .polling_interval_threshold = cfg->disk_space_monitor_polling_interval_threshold,
+            };
+            _disk_space_monitor_shard0.emplace(abort_sources.local(), data_dir_path, dsm_cfg);
+            _disk_space_monitor_shard0->start().get();
+            auto stop_dsm = defer([this] { _disk_space_monitor_shard0->stop().get(); });
+
             // get_cm_cfg is called on each shard when starting a sharded<compaction_manager>
             // we need the getter since updateable_value is not shard-safe (#7316)
             auto get_cm_cfg = sharded_parameter([&] {
@@ -591,6 +609,10 @@ private:
 
             _sstm.start(std::ref(*cfg), sstables::storage_manager::config{}).get();
             auto stop_sstm = deferred_stop(_sstm);
+
+            _sl_controller.start(std::ref(_auth_service), std::ref(_token_metadata), std::ref(abort_sources), qos::service_level_options{.shares = 1000}, scheduling_groups.statement_scheduling_group).get();
+            auto stop_sl_controller = defer([this] { _sl_controller.stop().get(); });
+            _sl_controller.invoke_on_all(&qos::service_level_controller::start).get();
 
             lang::manager::config lang_config;
             lang_config.lua.max_bytes = cfg->user_defined_function_allocation_limit_bytes();
@@ -617,7 +639,7 @@ private:
                 _db.stop().get();
             });
 
-            _db.invoke_on_all(&replica::database::start).get();
+            _db.invoke_on_all(&replica::database::start, std::ref(_sl_controller)).get();
 
             smp::invoke_on_all([blocked_reactor_notify_ms] {
                 engine().update_blocked_reactor_notify_ms(blocked_reactor_notify_ms);
@@ -658,9 +680,6 @@ private:
 
             set_abort_on_internal_error(true);
             const gms::inet_address listen("127.0.0.1");
-            _sl_controller.start(std::ref(_auth_service), std::ref(_token_metadata), std::ref(abort_sources), qos::service_level_options{}).get();
-            auto stop_sl_controller = defer([this] { _sl_controller.stop().get(); });
-            _sl_controller.invoke_on_all(&qos::service_level_controller::start).get();
 
             _sys_ks.start(std::ref(_qp), std::ref(_db)).get();
             auto stop_sys_kd = defer([this] {
@@ -683,11 +702,10 @@ private:
                 host_id = linfo.host_id;
                 _sys_ks.local().save_local_info(std::move(linfo), _snitch.local()->get_location(), my_address, my_address).get();
             }
-            locator::shared_token_metadata::mutate_on_all_shards(_token_metadata, [hostid = host_id, &cfg_in] (locator::token_metadata& tm) {
+            locator::shared_token_metadata::mutate_on_all_shards(_token_metadata, [hostid = host_id] (locator::token_metadata& tm) {
                 auto& topo = tm.get_topology();
                 topo.set_host_id_cfg(hostid);
                 topo.add_or_update_endpoint(hostid,
-                                            cfg_in.broadcast_address,
                                             std::nullopt,
                                             locator::node::state::normal,
                                             smp::count);
@@ -698,6 +716,15 @@ private:
             auto stop_gossip_address_map = defer([this] {
                 _gossip_address_map.stop().get();
             });
+
+            auto arct_cfg = [&] {
+                return utils::advanced_rpc_compressor::tracker::config{
+                    .zstd_quota_fraction{1.0},
+                    .register_metrics = true,
+                };
+            };
+            _compressor_tracker.start(arct_cfg).get();
+            auto stop_compressor_tracker = defer([this] { _compressor_tracker.stop().get(); });
 
             uint16_t port = 7000;
             seastar::server_socket tmp;
@@ -719,7 +746,9 @@ private:
                        port = tmp.local_address().port();
                     }
                     // Don't start listening so tests can be run in parallel if cfg_in.ms_listen is not set to true explicitly.
-                    _ms.start(host_id, listen, std::move(port), std::ref(_feature_service), std::ref(_gossip_address_map)).get();
+                    _ms.start(host_id, listen, std::move(port), std::ref(_feature_service),
+                              std::ref(_gossip_address_map), std::ref(_compressor_tracker),
+                              std::ref(_sl_controller)).get();
                     stop_ms = defer(stop_type(stop_ms_func));
 
                     if (cfg_in.ms_listen) {
@@ -729,7 +758,7 @@ private:
                         // Once the seastar issue is fixed, we can just keep the tmp socket aliva across
                         // the listen invoke below.
                         tmp = {};
-                        _ms.invoke_on_all(&netw::messaging_service::start_listen, std::ref(_token_metadata)).get();
+                        _ms.invoke_on_all(&netw::messaging_service::start_listen, std::ref(_token_metadata), [host_id] (gms::inet_address ip) {return host_id; }).get();
                     }
                 } catch (std::system_error& e) {
                     // if we still hit a used port (quick other process), just shut down ms and try again.
@@ -824,6 +853,8 @@ private:
                     abort_sources.local(), _group0_registry.local(), _ms,
                     _gossiper.local(), _feature_service.local(), _sys_ks.local(), group0_client, scheduling_groups.gossip_scheduling_group};
 
+            auto compression_dict_updated_callback = [] { return make_ready_future<>(); };
+
             _ss.start(std::ref(abort_sources), std::ref(_db),
                 std::ref(_gossiper),
                 std::ref(_sys_ks),
@@ -842,7 +873,9 @@ private:
                 std::ref(_sl_controller),
                 std::ref(_topology_state_machine),
                 std::ref(_task_manager),
-                std::ref(_gossip_address_map)).get();
+                std::ref(_gossip_address_map),
+                compression_dict_updated_callback
+            ).get();
             auto stop_storage_service = defer([this] { _ss.stop().get(); });
 
             _mnotifier.local().register_listener(&_ss.local());
@@ -909,13 +942,6 @@ private:
                 _group0_registry.invoke_on_all(&service::raft_group_registry::drain_on_shutdown).get();
             });
 
-            group0_service.start().get();
-            auto stop_group0_service = defer([&group0_service] {
-                group0_service.abort().get();
-            });
-
-            _ss.local().set_group0(group0_service);
-
             _view_update_generator.start(std::ref(_db), std::ref(_proxy), std::ref(abort_sources)).get();
             _view_update_generator.invoke_on_all(&db::view::view_update_generator::start).get();
             auto stop_view_update_generator = defer([this] {
@@ -964,6 +990,13 @@ private:
             auto stop_cdc_service = defer([this] {
                 _cdc.stop().get();
             });
+
+            group0_service.start().get();
+            auto stop_group0_service = defer([&group0_service] {
+                group0_service.abort().get();
+            });
+
+            _ss.local().set_group0(group0_service);
 
             // Load address_map from system.peers and subscribe to gossiper events to keep it updated.
             _ss.local().init_address_map(_gossip_address_map.local()).get();
@@ -1028,6 +1061,9 @@ private:
             _view_builder.invoke_on_all([this] (db::view::view_builder& vb) {
                 return vb.start(_mm.local());
             }).get();
+            auto drain_view_builder = defer([this] {
+                _view_builder.invoke_on_all(&db::view::view_builder::drain).get();
+            });
 
             // Create the testing user.
             try {
@@ -1053,7 +1089,7 @@ private:
 
             _group0_client = &group0_client;
 
-            _core_local.start(std::ref(_auth_service), std::ref(_sl_controller)).get();
+            _core_local.start(std::ref(_auth_service), std::ref(_sl_controller), cfg_in.query_timeout.value_or(infinite_timeout_config)).get();
             auto stop_core_local = defer([this] { _core_local.stop().get(); });
 
             if (!local_db().has_keyspace(ks_name)) {
@@ -1089,6 +1125,10 @@ public:
         return local_qp().execute_batch_without_checking_exception_message(batch, *qs, lqo, {}).then([qs, batch, qo = std::move(qo)] (auto msg) {
             return cql_transport::messages::propagate_exception_as_future(std::move(msg));
         });
+    }
+
+    virtual sharded<qos::service_level_controller>& service_level_controller_service() override {
+        return _sl_controller;
     }
 };
 

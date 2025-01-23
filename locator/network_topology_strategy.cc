@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #include <algorithm>
@@ -176,13 +176,13 @@ class natural_endpoints_tracker {
     // all token owners in each DC, so we can check when we have exhausted all
     // the token-owning members of a DC
     //
-    std::unordered_map<sstring, std::unordered_set<inet_address>> _token_owners;
+    std::unordered_map<sstring, std::unordered_set<locator::host_id>> _token_owners;
 
     //
     // all racks (with non-token owners filtered out) in a DC so we can check
     // when we have exhausted all racks in a DC
     //
-    std::unordered_map<sstring, std::unordered_map<sstring, std::unordered_set<inet_address>>> _racks;
+    std::unordered_map<sstring, std::unordered_map<sstring, std::unordered_set<locator::host_id>>> _racks;
 
     std::unordered_map<std::string_view, data_center_endpoints> _dcs;
 
@@ -193,8 +193,8 @@ public:
         : _tm(tm)
         , _tp(_tm.get_topology())
         , _dc_rep_factor(dc_rep_factor)
-        , _token_owners(_tm.get_datacenter_token_owners_ips())
-        , _racks(_tm.get_datacenter_racks_token_owners_ips())
+        , _token_owners(_tm.get_datacenter_token_owners())
+        , _racks(_tm.get_datacenter_racks_token_owners())
     {
         // not aware of any cluster members
         SCYLLA_ASSERT(!_token_owners.empty() && !_racks.empty());
@@ -235,7 +235,7 @@ public:
     }
 
     static void check_enough_endpoints(const token_metadata& tm, const std::unordered_map<sstring, size_t>& dc_rf) {
-        auto dc_endpoints = tm.get_datacenter_token_owners_ips();
+        auto dc_endpoints = tm.get_datacenter_token_owners();
         auto endpoints_in = [&dc_endpoints](sstring dc) {
             auto i = dc_endpoints.find(dc);
             return i != dc_endpoints.end() ? i->second.size() : size_t(0);
@@ -309,7 +309,7 @@ effective_replication_map_ptr network_topology_strategy::make_replication_map(ta
 
 static unsigned calculate_initial_tablets_from_topology(const schema& s, token_metadata_ptr tm, const std::unordered_map<sstring, size_t>& rf) {
     unsigned initial_tablets = std::numeric_limits<unsigned>::min();
-    for (const auto& dc : tm->get_datacenter_token_owners_ips()) {
+    for (const auto& dc : tm->get_datacenter_token_owners()) {
         unsigned shards_in_dc = 0;
         unsigned rf_in_dc = 1;
 
@@ -399,8 +399,8 @@ future<tablet_replica_set> network_topology_strategy::add_tablets_in_dc(schema_p
 
     auto replicas = cur_replicas;
     // all_dc_racks is ordered lexicographically on purpose
-    auto all_dc_racks = boost::copy_range<std::map<sstring, std::unordered_set<std::reference_wrapper<const node>>>>(
-            tm->get_datacenter_racks_token_owners_nodes().at(dc));
+    auto all_dc_racks = tm->get_datacenter_racks_token_owners_nodes().at(dc)
+        | std::ranges::to<std::map>();
 
     // Track all nodes with no replicas on them for this tablet, per rack.
     struct node_load {

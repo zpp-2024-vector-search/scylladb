@@ -3,12 +3,13 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 
-#include <cstddef>
+// for checking __GLIBCXX__
+#include <version>
 
 #if defined(__GLIBCXX__) && (defined(__x86_64__) || defined(__aarch64__))
   #define OPTIMIZED_EXCEPTION_HANDLING_AVAILABLE
@@ -22,8 +23,6 @@
   #endif
 #endif
 
-#include <seastar/core/sstring.hh>
-#include <seastar/core/on_internal_error.hh>
 #include <seastar/core/align.hh>
 
 #include <functional>

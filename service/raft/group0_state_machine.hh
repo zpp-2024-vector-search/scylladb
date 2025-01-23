@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 #pragma once
 
@@ -95,6 +95,7 @@ class group0_state_machine : public raft_state_machine {
     struct modules_to_reload {
         bool service_levels_cache = false;
         bool service_levels_effective_cache = false;
+        bool compression_dictionary = false;
     };
 
     raft_group0_client& _client;

@@ -3,12 +3,10 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
-
-#include <fmt/format.h>
 
 #include <vector>
 #include "gms/gossip_address_map.hh"
@@ -109,6 +107,8 @@ class repair_service : public seastar::peering_sharded_service<repair_service> {
     shared_ptr<row_level_repair_gossip_helper> _gossip_helper;
     bool _stopped = false;
 
+    gate _gate;
+
     size_t _max_repair_memory;
     seastar::semaphore _memory_sem;
     seastar::named_semaphore _load_parallelism_semaphore = {16, named_semaphore_exception_factory{"Load repair history parallelism"}};
@@ -177,7 +177,7 @@ private:
 public:
     future<> repair_tablets(repair_uniq_id id, sstring keyspace_name, std::vector<sstring> table_names, bool primary_replica_only = true, dht::token_range_vector ranges_specified = {}, std::vector<sstring> dcs = {}, std::unordered_set<locator::host_id> hosts = {}, std::unordered_set<locator::host_id> ignore_nodes = {}, std::optional<int> ranges_parallelism = std::nullopt);
 
-    future<> repair_tablet(gms::gossip_address_map& addr_map, locator::tablet_metadata_guard& guard, locator::global_tablet_id gid);
+    future<gc_clock::time_point> repair_tablet(gms::gossip_address_map& addr_map, locator::tablet_metadata_guard& guard, locator::global_tablet_id gid);
 private:
 
     future<repair_update_system_table_response> repair_update_system_table_handler(
@@ -197,6 +197,7 @@ public:
     size_t max_repair_memory() const { return _max_repair_memory; }
     seastar::semaphore& memory_sem() { return _memory_sem; }
     locator::host_id my_host_id() const noexcept;
+    gate& async_gate() noexcept { return _gate; }
 
     repair::task_manager_module& get_repair_module() noexcept {
         return *_repair_module;

@@ -3,14 +3,15 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 
 #include <any>
+#include <memory>
 #include <cstdlib>
-#include <seastar/core/memory.hh>
+#include <string>
 #include <seastar/util/alloc_failure_injector.hh>
 #include <malloc.h>
 

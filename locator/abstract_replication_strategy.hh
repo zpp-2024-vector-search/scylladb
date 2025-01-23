@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -12,11 +12,9 @@
 #include <functional>
 #include <unordered_map>
 #include "gms/inet_address.hh"
-#include "locator/snitch_base.hh"
 #include "locator/token_range_splitter.hh"
 #include "dht/token-sharding.hh"
 #include "token_metadata.hh"
-#include "snitch_base.hh"
 #include "utils/maybe_yield.hh"
 #include "utils/sequenced_set.hh"
 #include "utils/simple_hashers.hh"
@@ -233,9 +231,6 @@ public:
     /// new replica.
     ///
     /// The returned addresses are present in the topology object associated with this instance.
-    virtual inet_address_vector_replica_set get_natural_endpoints(const token& search_token) const = 0;
-
-    /// Same as above but returns host ids instead of addresses
     virtual host_id_vector_replica_set get_natural_replicas(const token& search_token) const = 0;
 
     /// Same as above but returns host ids instead of addresses
@@ -335,7 +330,6 @@ private:
     friend class abstract_replication_strategy;
     friend class effective_replication_map_factory;
 public: // effective_replication_map
-    inet_address_vector_replica_set get_natural_endpoints(const token& search_token) const override;
     host_id_vector_replica_set get_natural_replicas(const token& search_token) const override;
     host_id_vector_topology_change get_pending_replicas(const token& search_token) const override;
     host_id_vector_replica_set get_replicas_for_reading(const token& token) const override;
@@ -399,7 +393,6 @@ public:
 
 private:
     future<dht::token_range_vector> do_get_ranges(noncopyable_function<stop_iteration(bool& add_range, const host_id& natural_endpoint)> consider_range_for_endpoint) const;
-    inet_address_vector_replica_set do_get_natural_endpoints(const token& tok, bool is_vnode) const;
     host_id_vector_replica_set do_get_replicas(const token& tok, bool is_vnode) const;
     stop_iteration for_each_natural_endpoint_until(const token& vnode_tok, const noncopyable_function<stop_iteration(const host_id&)>& func) const;
 

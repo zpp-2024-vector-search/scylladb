@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 
@@ -13,7 +13,8 @@
 #include <seastar/core/coroutine.hh>
 #include <seastar/util/file.hh>
 
-#include "test/lib/scylla_test_case.hh"
+#undef SEASTAR_TESTING_MAIN
+#include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
 #include <utility>
 #include <fmt/ranges.h>
@@ -54,19 +55,27 @@
 using namespace std::chrono_literals;
 using namespace sstables;
 
-class database_test {
+class database_test_wrapper {
     replica::database& _db;
 public:
-    explicit database_test(replica::database& db) : _db(db) { }
+    explicit database_test_wrapper(replica::database& db) : _db(db) { }
 
     reader_concurrency_semaphore& get_user_read_concurrency_semaphore() {
-        return _db._read_concurrency_sem;
+        return _db.read_concurrency_sem();
     }
     reader_concurrency_semaphore& get_streaming_read_concurrency_semaphore() {
         return _db._streaming_concurrency_sem;
     }
     reader_concurrency_semaphore& get_system_read_concurrency_semaphore() {
         return _db._system_read_concurrency_sem;
+    }
+
+    size_t get_total_user_reader_concurrency_semaphore_memory() {
+        return _db._reader_concurrency_semaphores_group._total_memory;
+    }
+
+    size_t get_total_user_reader_concurrency_semaphore_weight() {
+        return _db._reader_concurrency_semaphores_group._total_weight;
     }
 };
 
@@ -98,6 +107,8 @@ future<> do_with_cql_env_and_compaction_groups(std::function<void(cql_test_env&)
         co_await do_with_cql_env_and_compaction_groups_cgs(x_log2_compaction_groups, func, cfg, thread_attr);
     }
 }
+
+BOOST_AUTO_TEST_SUITE(database_test)
 
 SEASTAR_TEST_CASE(test_safety_after_truncate) {
     auto cfg = make_shared<db::config>();
@@ -1125,11 +1136,11 @@ SEASTAR_THREAD_TEST_CASE(reader_concurrency_semaphore_selection_test) {
         destroy_scheduling_group(unknown_scheduling_group).get();
     });
 
-    const auto user_semaphore = std::mem_fn(&database_test::get_user_read_concurrency_semaphore);
-    const auto system_semaphore = std::mem_fn(&database_test::get_system_read_concurrency_semaphore);
-    const auto streaming_semaphore = std::mem_fn(&database_test::get_streaming_read_concurrency_semaphore);
+    const auto user_semaphore = std::mem_fn(&database_test_wrapper::get_user_read_concurrency_semaphore);
+    const auto system_semaphore = std::mem_fn(&database_test_wrapper::get_system_read_concurrency_semaphore);
+    const auto streaming_semaphore = std::mem_fn(&database_test_wrapper::get_streaming_read_concurrency_semaphore);
 
-    std::vector<std::pair<scheduling_group, std::function<reader_concurrency_semaphore&(database_test&)>>> scheduling_group_and_expected_semaphore{
+    std::vector<std::pair<scheduling_group, std::function<reader_concurrency_semaphore&(database_test_wrapper&)>>> scheduling_group_and_expected_semaphore{
         {default_scheduling_group(), system_semaphore}
     };
 
@@ -1146,9 +1157,10 @@ SEASTAR_THREAD_TEST_CASE(reader_concurrency_semaphore_selection_test) {
 
     do_with_cql_env_and_compaction_groups([&scheduling_group_and_expected_semaphore] (cql_test_env& e) {
         auto& db = e.local_db();
-        database_test tdb(db);
+        database_test_wrapper tdb(db);
         for (const auto& [sched_group, expected_sem_getter] : scheduling_group_and_expected_semaphore) {
-            with_scheduling_group(sched_group, [&db, sched_group = sched_group, expected_sem_ptr = &expected_sem_getter(tdb)] {
+            with_scheduling_group(sched_group, [&db, sched_group = sched_group, &tdb, &expected_sem_getter = expected_sem_getter] {
+                auto expected_sem_ptr = &expected_sem_getter(tdb);
                 auto& sem = db.get_reader_concurrency_semaphore();
                 if (&sem != expected_sem_ptr) {
                     BOOST_FAIL(fmt::format("Unexpected semaphore for scheduling group {}, expected {}, got {}", sched_group.name(), expected_sem_ptr->name(), sem.name()));
@@ -1196,7 +1208,7 @@ SEASTAR_THREAD_TEST_CASE(max_result_size_for_query_selection_test) {
 
     do_with_cql_env_and_compaction_groups([&scheduling_group_and_expected_max_result_size] (cql_test_env& e) {
         auto& db = e.local_db();
-        database_test tdb(db);
+        database_test_wrapper tdb(db);
         for (const auto& [sched_group, expected_max_size] : scheduling_group_and_expected_max_result_size) {
             with_scheduling_group(sched_group, [&db, sched_group = sched_group, expected_max_size = expected_max_size] {
                 const auto max_size = db.get_query_max_result_size();
@@ -1291,6 +1303,92 @@ SEASTAR_TEST_CASE(upgrade_sstables) {
             }
         }).get();
     });
+}
+
+SEASTAR_THREAD_TEST_CASE(per_service_level_reader_concurrency_semaphore_test) {
+    cql_test_config cfg;
+    do_with_cql_env_thread([] (cql_test_env& e) {
+        const size_t num_service_levels = 3;
+        const size_t num_keys_to_insert = 10;
+        const size_t num_individual_reads_to_test = 50;
+        auto& db = e.local_db();
+        database_test_wrapper dbt(db);
+        size_t total_memory = dbt.get_total_user_reader_concurrency_semaphore_memory();
+        sharded<qos::service_level_controller>& sl_controller = e.service_level_controller_service();
+        std::array<sstring, num_service_levels> sl_names;
+        qos::service_level_options slo;
+        size_t expected_total_weight = 0;
+        auto index_to_weight = [] (size_t i) -> size_t {
+            return (i + 1)*100;
+        };
+
+        // make the default service level take as little memory as possible
+        slo.shares.emplace<int32_t>(1);
+        expected_total_weight += 1;
+        sl_controller.local().add_service_level(qos::service_level_controller::default_service_level_name, slo).get();
+
+        // Just to make the code more readable.
+        auto get_reader_concurrency_semaphore_for_sl = [&] (sstring sl_name) -> reader_concurrency_semaphore& {
+            return *sl_controller.local().with_service_level(sl_name, noncopyable_function<reader_concurrency_semaphore*()>([&] {
+                return &db.get_reader_concurrency_semaphore();
+            })).get();
+        };
+
+        for (unsigned i = 0; i < num_service_levels; i++) {
+            sstring sl_name = format("sl{}", i);
+            slo.shares.emplace<int32_t>(index_to_weight(i));
+            sl_controller.local().add_service_level(sl_name, slo).get();
+            expected_total_weight += index_to_weight(i);
+            // Make sure that the total weight is tracked correctly in the semaphore group
+            BOOST_REQUIRE_EQUAL(expected_total_weight, dbt.get_total_user_reader_concurrency_semaphore_weight());
+            sl_names[i] = sl_name;
+            size_t total_distributed_memory = 0;
+            for (unsigned j = 0 ; j <= i ; j++) {
+                reader_concurrency_semaphore& sem = get_reader_concurrency_semaphore_for_sl(sl_names[j]);
+                // Make sure that all semaphores that has been created until now - have the right amount of available memory
+                // after the operation has ended.
+                // We allow for a small delta of up to num_service_levels. This allows an off-by-one for each semaphore,
+                // the remainder being added to one of the semaphores.
+                // We make sure this didn't leak/create memory by checking the total below.
+                const auto delta = std::abs(ssize_t((index_to_weight(j) * total_memory) / expected_total_weight) - sem.available_resources().memory);
+                BOOST_REQUIRE_LE(delta, num_service_levels);
+                total_distributed_memory += sem.available_resources().memory;
+            }
+            total_distributed_memory += get_reader_concurrency_semaphore_for_sl(qos::service_level_controller::default_service_level_name).available_resources().memory;
+            BOOST_REQUIRE_EQUAL(total_distributed_memory, total_memory);
+        }
+
+        auto get_semaphores_stats_snapshot = [&] () {
+            std::unordered_map<sstring, reader_concurrency_semaphore::stats> snapshot;
+            for (auto&& sl_name : sl_names) {
+                snapshot[sl_name] = get_reader_concurrency_semaphore_for_sl(sl_name).get_stats();
+            }
+            return snapshot;
+        };
+        e.execute_cql("CREATE TABLE tbl (a int, b int, PRIMARY KEY (a));").get();
+
+        for (unsigned i = 0; i < num_keys_to_insert; i++) {
+            for (unsigned j = 0; j < num_keys_to_insert; j++) {
+                e.execute_cql(format("INSERT INTO tbl(a, b) VALUES ({}, {});", i, j)).get();
+            }
+        }
+
+        for (unsigned i = 0; i < num_individual_reads_to_test; i++) {
+            int random_service_level = tests::random::get_int(num_service_levels - 1);
+            auto snapshot_before = get_semaphores_stats_snapshot();
+
+            sl_controller.local().with_service_level(sl_names[random_service_level], noncopyable_function<future<>()> ([&] {
+                return e.execute_cql("SELECT * FROM tbl;").discard_result();
+            })).get();
+            auto snapshot_after = get_semaphores_stats_snapshot();
+            for (auto& [sl_name, stats] : snapshot_before) {
+                // Make sure that the only semaphore that experienced any activity (at least measured activity) is
+                // the semaphore that belongs to the current service level.
+                BOOST_REQUIRE((stats == snapshot_after[sl_name] && sl_name != sl_names[random_service_level]) ||
+                        (stats != snapshot_after[sl_name] && sl_name == sl_names[random_service_level]));
+            }
+        }
+    }, std::move(cfg)).get();
 }
 
 SEASTAR_TEST_CASE(populate_from_quarantine_works) {
@@ -1418,7 +1516,7 @@ SEASTAR_TEST_CASE(database_drop_column_family_clears_querier_cache) {
         auto q = query::querier(
                 tbl.as_mutation_source(),
                 tbl.schema(),
-                database_test(db).get_user_read_concurrency_semaphore().make_tracking_only_permit(s, "test", db::no_timeout, {}),
+                database_test_wrapper(db).get_user_read_concurrency_semaphore().make_tracking_only_permit(s, "test", db::no_timeout, {}),
                 query::full_partition_range,
                 s->full_slice(),
                 nullptr);
@@ -1513,3 +1611,5 @@ SEASTAR_TEST_CASE(mutation_dump_generated_schema_deterministic_id_version) {
 
     return make_ready_future<>();
 }
+
+BOOST_AUTO_TEST_SUITE_END()

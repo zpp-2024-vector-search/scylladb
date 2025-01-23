@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <type_traits>
@@ -402,7 +402,7 @@ future<cdc::generation_id> generation_service::legacy_make_new_generation(const 
                 throw std::runtime_error(
                         format("Can't find endpoint for token {}", end));
             }
-            const auto ep = tmptr->get_endpoint_for_host_id(*endpoint);
+            const auto ep = _gossiper.get_address_map().get(*endpoint);
             auto sc = get_shard_count(ep, _gossiper);
             return {sc > 0 ? sc : 1, get_sharding_ignore_msb(ep, _gossiper)};
         }

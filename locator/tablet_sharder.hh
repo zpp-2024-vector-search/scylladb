@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -11,7 +11,7 @@
 #include "dht/token-sharding.hh"
 #include "locator/tablets.hh"
 #include "locator/token_metadata.hh"
-#include "utils/to_string.hh"
+#include <fmt/std.h>
 
 namespace locator {
 

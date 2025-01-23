@@ -20,16 +20,18 @@ Querying data from data is done using a ``SELECT`` statement:
                    : [ BYPASS CACHE ]
                    : [ USING TIMEOUT `timeout` ]
    select_clause: `selector` [ AS `identifier` ] ( ',' `selector` [ AS `identifier` ] )*
-   selector: `column_name`
+   selector: ( `column_name`
            : | CAST '(' `selector` AS `cql_type` ')'
            : | `function_name` '(' [ `selector` ( ',' `selector` )* ] ')'
            : | COUNT '(' '*' ')'
+           : )
+           : ( '.' `field_name` | '[' `term` ']' )*
    where_clause: `relation` ( AND `relation` )*
    group_by_clause: `column_name` (',' `column_name` )*
    relation: `column_name` `operator` `term`
            : '(' `column_name` ( ',' `column_name` )* ')' `operator` `tuple_literal`
            : TOKEN '(' `column_name` ( ',' `column_name` )* ')' `operator` `term`
-   operator: '=' | '<' | '>' | '<=' | '>=' | IN | CONTAINS | CONTAINS KEY
+   operator: '=' | '<' | '>' | '<=' | '>=' | IN | NOT IN | CONTAINS | CONTAINS KEY
    ordering_clause: `column_name` [ ASC | DESC ] ( ',' `column_name` [ ASC | DESC ] )*
    timeout: `duration`
 

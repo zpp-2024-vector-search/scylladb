@@ -3,11 +3,12 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 
-#include "test/lib/scylla_test_case.hh"
+#undef SEASTAR_TESTING_MAIN
+#include <seastar/testing/test_case.hh>
 
 #include <fmt/ranges.h>
 #include "db/config.hh"
@@ -21,6 +22,8 @@
 #include "test/lib/simple_schema.hh"
 #include "test/lib/sstable_utils.hh"
 #include "readers/from_mutations_v2.hh"
+
+BOOST_AUTO_TEST_SUITE(sstable_set_test)
 
 using namespace sstables;
 
@@ -187,7 +190,7 @@ SEASTAR_TEST_CASE(test_tablet_sstable_set_copy_ctor) {
         }
         auto& cf = env.local_db().find_column_family("test_tablet_sstable_set_copy_ctor", "test");
         auto& sgm = column_family_test::get_storage_group_manager(cf);
-        sgm->split_all_storage_groups().get();
+        sgm->split_all_storage_groups(tasks::task_info{}).get();
 
         auto tablet_sstable_set = replica::make_tablet_sstable_set(cf.schema(), *sgm.get(), locator::tablet_map(8));
         auto tablet_sstable_set_copy = *tablet_sstable_set.get();
@@ -197,3 +200,5 @@ SEASTAR_TEST_CASE(test_tablet_sstable_set_copy_ctor) {
 
     }, std::move(cfg));
 }
+
+BOOST_AUTO_TEST_SUITE_END()

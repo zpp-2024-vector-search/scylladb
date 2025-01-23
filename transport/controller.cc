@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "utils/assert.hh"
@@ -13,6 +13,7 @@
 #include <seastar/net/socket_defs.hh>
 #include <seastar/net/unix_address.hh>
 #include <seastar/core/file-types.hh>
+#include <seastar/core/with_scheduling_group.hh>
 #include "transport/server.hh"
 #include "service/memory_limiter.hh"
 #include "db/config.hh"
@@ -349,6 +350,16 @@ future<> controller::set_cql_ready(bool ready) {
 
 future<utils::chunked_vector<client_data>> controller::get_client_data() {
     return _server ? _server->local().get_client_data() : protocol_server::get_client_data();
+}
+
+future<> controller::update_connections_scheduling_group() {
+    if (!_server) {
+        co_return;
+    }
+
+    co_await _server->invoke_on_all([] (auto& server) {
+        return server.update_connections_scheduling_group();
+    });
 }
 
 future<std::vector<connection_service_level_params>> controller::get_connections_service_level_params() {

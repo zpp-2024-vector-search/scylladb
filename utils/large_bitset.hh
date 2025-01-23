@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 // A bitset containing a very large number of bits, so it uses fragmented
@@ -12,10 +12,7 @@
 #pragma once
 
 #include <limits>
-#include <seastar/core/preempt.hh>
 #include "utils/chunked_vector.hh"
-
-using namespace seastar;
 
 class large_bitset {
     using int_type = uint64_t;

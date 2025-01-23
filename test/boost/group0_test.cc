@@ -3,10 +3,11 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-#include "test/lib/scylla_test_case.hh"
+#undef SEASTAR_TESTING_MAIN
+#include <seastar/testing/test_case.hh>
 #include "test/lib/cql_assertions.hh"
 #include <seastar/core/coroutine.hh>
 
@@ -32,6 +33,8 @@ static future<size_t> get_history_size(cql_test_env& e) {
     co_return (co_await fetch_rows(e, "select * from system.group0_history")).size();
 }
 
+BOOST_AUTO_TEST_SUITE(group0_test)
+
 SEASTAR_TEST_CASE(test_abort_server_on_background_error) {
 #ifndef SCYLLA_ENABLE_ERROR_INJECTION
     std::cerr << "Skipping test as it depends on error injection. Please run in mode where it's enabled (debug,dev).\n";
@@ -43,7 +46,7 @@ SEASTAR_TEST_CASE(test_abort_server_on_background_error) {
         auto get_metric_ui64 = [&](sstring name) {
             const auto& value_map = seastar::metrics::impl::get_value_map();
             const auto& metric_family = value_map.at("raft_group0_" + name);
-            const auto& registered_metric = metric_family.at({{"shard", "0"}});
+            const auto& registered_metric = metric_family.at(make_lw_shared<const metrics::impl::labels_type>({{"shard", "0"}}));
             return (*registered_metric)().ui();
         };
 
@@ -341,3 +344,5 @@ SEASTAR_TEST_CASE(test_group0_batch) {
         co_await std::move(mc1).commit(rclient, as, ::service::raft_timeout{});
     });
 }
+
+BOOST_AUTO_TEST_SUITE_END()

@@ -3,14 +3,12 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 
-#include <boost/algorithm/string/join.hpp>
 #include <boost/range/irange.hpp>
 #include <boost/range/algorithm.hpp>
-#include <boost/range/adaptor/reversed.hpp>
 #include <boost/test/unit_test.hpp>
 #include <boost/multiprecision/cpp_int.hpp>
 
@@ -19,7 +17,8 @@
 
 #include <seastar/net/inet_address.hh>
 
-#include "test/lib/scylla_test_case.hh"
+#undef SEASTAR_TESTING_MAIN
+#include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/cql_assertions.hh"
@@ -39,6 +38,7 @@
 #include "db/extensions.hh"
 #include "cql3/cql_config.hh"
 #include "test/lib/exception_utils.hh"
+#include "service/qos/qos_common.hh"
 #include "utils/rjson.hh"
 #include "schema/schema_builder.hh"
 #include "service/migration_manager.hh"
@@ -53,6 +53,7 @@
 #include "replica/schema_describe_helper.hh"
 
 
+BOOST_AUTO_TEST_SUITE(cql_query_test)
 
 using namespace std::literals::chrono_literals;
 
@@ -1273,6 +1274,7 @@ SEASTAR_TEST_CASE(test_range_deletion_scenarios) {
 
 SEASTAR_TEST_CASE(test_range_deletion_scenarios_with_compact_storage) {
     return do_with_cql_env_thread([] (cql_test_env& e) {
+        e.execute_cql("update system.config SET value='true' where name='enable_create_table_with_compact_storage';").get();
         e.execute_cql("create table cf (p int, c int, v text, primary key (p, c)) with compact storage;").get();
         for (auto i = 0; i < 10; ++i) {
             e.execute_cql(format("insert into cf (p, c, v) values (1, {:d}, 'abc');", i)).get();
@@ -2625,6 +2627,7 @@ SEASTAR_TEST_CASE(test_in_restriction) {
 
 SEASTAR_TEST_CASE(test_compact_storage) {
     return do_with_cql_env_thread([] (cql_test_env& e) {
+        e.execute_cql("update system.config SET value='true' where name='enable_create_table_with_compact_storage';").get();
         e.execute_cql("create table tcs (p1 int, c1 int, r1 int, PRIMARY KEY (p1, c1)) with compact storage;").get();
         BOOST_REQUIRE(e.local_db().has_schema("ks", "tcs"));
         e.execute_cql("insert into tcs (p1, c1, r1) values (1, 2, 3);").get();
@@ -2742,8 +2745,9 @@ SEASTAR_TEST_CASE(test_collections_of_collections) {
 
 
 SEASTAR_TEST_CASE(test_result_order) {
-    return do_with_cql_env([] (cql_test_env& e) {
-        return e.execute_cql("create table tro (p1 int, c1 text, r1 int, PRIMARY KEY (p1, c1)) with compact storage;").discard_result().then([&e] {
+    return do_with_cql_env_thread([] (cql_test_env& e) {
+        e.execute_cql("update system.config SET value='true' where name='enable_create_table_with_compact_storage';").get();
+        e.execute_cql("create table tro (p1 int, c1 text, r1 int, PRIMARY KEY (p1, c1)) with compact storage;").discard_result().then([&e] {
             return e.execute_cql("insert into tro (p1, c1, r1) values (1, 'z', 1);").discard_result();
         }).then([&e] {
             return e.execute_cql("insert into tro (p1, c1, r1) values (1, 'bbbb', 2);").discard_result();
@@ -2766,7 +2770,7 @@ SEASTAR_TEST_CASE(test_result_order) {
                 { int32_type->decompose(1), utf8_type->decompose(sstring("cccc")), int32_type->decompose(6) },
                 { int32_type->decompose(1), utf8_type->decompose(sstring("z")), int32_type->decompose(1) },
             });
-        });
+        }).get();
     });
 }
 
@@ -3729,6 +3733,7 @@ SEASTAR_TEST_CASE(test_aggregate_and_simple_selection_together) {
 
 SEASTAR_TEST_CASE(test_alter_type_on_compact_storage_with_no_regular_columns_does_not_crash) {
     return do_with_cql_env_thread([] (cql_test_env& e) {
+        e.execute_cql("update system.config SET value='true' where name='enable_create_table_with_compact_storage';").get();
         cquery_nofail(e, "CREATE TYPE my_udf (first text);");
         cquery_nofail(e, "create table z (pk int, ck frozen<my_udf>, primary key(pk, ck)) with compact storage;");
         cquery_nofail(e, "alter type my_udf add test_int int;");
@@ -4735,6 +4740,8 @@ SEASTAR_TEST_CASE(test_impossible_where) {
     });
 }
 
+} // cql_query_test namespace
+
 // FIXME: copy-pasta
 static bool has_more_pages(::shared_ptr<cql_transport::messages::result_message> res) {
     auto rows = dynamic_pointer_cast<cql_transport::messages::result_message::rows>(res);
@@ -4757,6 +4764,8 @@ static lw_shared_ptr<service::pager::paging_state> extract_paging_state(::shared
     }
     return make_lw_shared<service::pager::paging_state>(*paging_state);
 };
+
+namespace cql_query_test {
 
 SEASTAR_THREAD_TEST_CASE(test_query_limit) {
     cql_test_config cfg;
@@ -5055,14 +5064,21 @@ SEASTAR_TEST_CASE(test_user_based_sla_queries) {
         e.execute_cql("CREATE SERVICE_LEVEL sl_1;").get();
         auto msg = e.execute_cql("LIST SERVICE_LEVEL sl_1;").get();
         assert_that(msg).is_rows().with_rows({
-            {utf8_type->decompose("sl_1"), {}, {}},
+            {utf8_type->decompose("sl_1"), {}, {}, int32_type->decompose(1000)},
         });
-        e.execute_cql("CREATE SERVICE_LEVEL sl_2;").get();
+        //create and alter service levels
+        e.execute_cql("CREATE SERVICE_LEVEL sl_2 WITH SHARES = 200;").get();
+        e.execute_cql("ALTER SERVICE_LEVEL sl_1 WITH SHARES = 111;").get();
+        msg = e.execute_cql("LIST ALL SERVICE_LEVELS;").get();
+        assert_that(msg).is_rows().with_rows({
+            {utf8_type->decompose("sl_1"), {}, {}, int32_type->decompose(111), utf8_type->decompose("35.69%")},
+            {utf8_type->decompose("sl_2"), {}, {}, int32_type->decompose(200), utf8_type->decompose("64.31%")},
+        });
         //drop service levels
         e.execute_cql("DROP SERVICE_LEVEL sl_1;").get();
         msg = e.execute_cql("LIST ALL SERVICE_LEVELS;").get();
         assert_that(msg).is_rows().with_rows({
-            {utf8_type->decompose("sl_2"), {}, {}},
+            {utf8_type->decompose("sl_2"), {}, {}, int32_type->decompose(200), utf8_type->decompose("100.00%")},
         });
 
         // validate exceptions (illegal requests)
@@ -5070,8 +5086,11 @@ SEASTAR_TEST_CASE(test_user_based_sla_queries) {
         e.execute_cql("DROP SERVICE_LEVEL IF EXISTS sl_1;").get();
 
         BOOST_REQUIRE_THROW(e.execute_cql("CREATE SERVICE_LEVEL sl_2;").get(), exceptions::invalid_request_exception);
-        BOOST_REQUIRE_THROW(e.execute_cql("CREATE SERVICE_LEVEL sl_2;").get(), exceptions::invalid_request_exception);
+        BOOST_REQUIRE_THROW(e.execute_cql("CREATE SERVICE_LEVEL sl_2 WITH SHARES = 999;").get(), exceptions::invalid_request_exception);
         e.execute_cql("CREATE SERVICE_LEVEL IF NOT EXISTS sl_2;").get();
+
+        BOOST_REQUIRE_THROW(e.execute_cql("CREATE SERVICE_LEVEL sl_1 WITH SHARES = 0;").get(), exceptions::syntax_exception);
+        BOOST_REQUIRE_THROW(e.execute_cql("CREATE SERVICE_LEVEL sl_1 WITH SHARES = 1001;").get(), exceptions::syntax_exception);
 
         // test attach role
         e.execute_cql("ATTACH SERVICE_LEVEL sl_2 TO tester").get();
@@ -5090,7 +5109,7 @@ SEASTAR_TEST_CASE(test_user_based_sla_queries) {
         BOOST_CHECK(true);
         // tests detaching service levels
         e.execute_cql("CREATE ROLE tester2;").get();
-        e.execute_cql("CREATE SERVICE_LEVEL sl_1;").get();
+        e.execute_cql("CREATE SERVICE_LEVEL sl_1 WITH SHARES = 998;").get();
         e.execute_cql("ATTACH SERVICE_LEVEL sl_1 TO tester2;").get();
         e.execute_cql("DETACH SERVICE_LEVEL FROM tester;").get();
         msg = e.execute_cql("LIST ATTACHED SERVICE_LEVEL OF tester2;").get();
@@ -5124,6 +5143,7 @@ SEASTAR_TEST_CASE(test_user_based_sla_queries) {
         msg = e.execute_cql("LIST ALL ATTACHED SERVICE_LEVELS;").get();
         assert_that(msg).is_rows().with_rows({
         });
+        BOOST_REQUIRE_THROW(e.execute_cql("ALTER SERVICE_LEVEL i_do_not_exist WITH shares = 1;").get(), exceptions::invalid_request_exception);
     });
 }
 
@@ -5921,3 +5941,5 @@ SEASTAR_TEST_CASE(test_schema_change_events) {
         BOOST_REQUIRE(dynamic_pointer_cast<event_t>(res));
      });
 }
+
+BOOST_AUTO_TEST_SUITE_END()

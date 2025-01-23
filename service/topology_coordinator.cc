@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <chrono>
@@ -16,7 +16,9 @@
 #include <seastar/coroutine/parallel_for_each.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/sharded.hh>
+#include <seastar/core/with_scheduling_group.hh>
 #include <seastar/util/noncopyable_function.hh>
+
 #include <variant>
 
 #include "auth/service.hh"
@@ -44,6 +46,7 @@
 #include "service/raft/raft_group0.hh"
 #include "service/raft/raft_group0_client.hh"
 #include "service/tablet_allocator.hh"
+#include "service/tablet_operation.hh"
 #include "service/topology_state_machine.hh"
 #include "topology_mutation.hh"
 #include "utils/assert.hh"
@@ -1157,6 +1160,8 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
         background_action_holder cleanup;
         background_action_holder repair;
         std::unordered_map<locator::tablet_transition_stage, background_action_holder> barriers;
+        // Record the repair_time returned by the repair_tablet rpc call
+        db_clock::time_point repair_time;
     };
 
     std::unordered_map<locator::global_tablet_id, tablet_migration_state> _tablets;
@@ -1281,7 +1286,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                            table_id, resize_decision.type_name(), resize_decision.sequence_number);
             out.emplace_back(
                 replica::tablet_mutation_builder(guard.write_timestamp(), table_id)
-                    .set_resize_decision(std::move(resize_decision))
+                    .set_resize_decision(std::move(resize_decision), _db.features())
                     .build());
     }
 
@@ -1569,19 +1574,26 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                         auto dst = primary.host;
                         auto tablet = gid;
                         rtlogger.info("Initiating tablet repair host={} tablet={}", dst, gid);
-                        co_await ser::storage_service_rpc_verbs::send_tablet_repair(&_messaging,
+                        auto res = co_await ser::storage_service_rpc_verbs::send_tablet_repair(&_messaging,
                                 dst, _as, raft::server_id(dst.uuid()), gid);
                         auto duration = std::chrono::duration<float>(db_clock::now() - sched_time);
-                        rtlogger.info("Finished tablet repair host={} tablet={} duration={}", dst, tablet, duration);
+                        auto& tablet_state = _tablets[tablet];
+                        tablet_state.repair_time = db_clock::from_time_t(gc_clock::to_time_t(res.repair_time));
+                        rtlogger.info("Finished tablet repair host={} tablet={} duration={} repair_time={}",
+                                dst, tablet, duration, res.repair_time);
                     })) {
                         auto& tinfo = tmap.get_tablet_info(gid.tablet);
                         bool valid = tinfo.repair_task_info.is_valid();
                         rtlogger.debug("Will set tablet {} stage to {}", gid, locator::tablet_transition_stage::end_repair);
                         auto update = get_mutation_builder()
                                         .set_stage(last_token, locator::tablet_transition_stage::end_repair)
+                                        .del_repair_task_info(last_token)
                                         .del_session(last_token);
                         if (valid) {
-                            auto time = tinfo.repair_task_info.sched_time;
+                            auto sched_time = tinfo.repair_task_info.sched_time;
+                            auto time = tablet_state.repair_time;
+                            rtlogger.debug("Set tablet repair time sched_time={} return_time={} set_time={}",
+                                    sched_time, tablet_state.repair_time, time);
                             update.set_repair_time(last_token, time);
                         }
                         updates.emplace_back(update.build());
@@ -1593,7 +1605,6 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                         _tablets.erase(gid);
                         updates.emplace_back(get_mutation_builder()
                             .del_transition(last_token)
-                            .del_repair_task_info(last_token)
                             .build());
                     }
                 }
@@ -1617,8 +1628,11 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                 on_internal_error(rtlogger, "should_preempt_balancing() retook the guard");
             }
         }
+
+        bool has_nodes_to_drain = false;
         if (!preempt) {
             auto plan = co_await _tablet_allocator.balance_tablets(get_token_metadata_ptr(), _tablet_load_stats, get_dead_nodes());
+            has_nodes_to_drain = plan.has_nodes_to_drain();
             if (!drain || plan.has_nodes_to_drain()) {
                 co_await generate_migration_updates(updates, guard, plan);
             }
@@ -1666,6 +1680,14 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
         }
 
         if (drain) {
+            if (has_nodes_to_drain) {
+                // Prevent jumping to write_both_read_old with un-drained tablets.
+                // This can happen when all candidate nodes are down.
+                rtlogger.warn("Tablet draining stalled: No tablets migrating but there are nodes to drain");
+                release_guard(std::move(guard));
+                co_await sleep(3s); // Throttle retries
+                co_return;
+            }
             updates.emplace_back(
                 topology_mutation_builder(guard.write_timestamp())
                     .set_transition_state(topology::transition_state::write_both_read_old)
@@ -2128,7 +2150,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                     // FIXME: removenode may be aborted and the already dead node can be resurrected. We should consider
                     // restoring its voter state on the recovery path.
                     if (node.rs->state == node_state::removing) {
-                        co_await _group0.make_nonvoter(node.id, _as);
+                        co_await _group0.set_voter_status(node.id, can_vote::no, _as);
                     }
 
                     // If we decommission a node when the number of nodes is even, we make it a non-voter early.
@@ -2145,7 +2167,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                                          "giving up leadership");
                             co_await step_down_as_nonvoter();
                         } else {
-                            co_await _group0.make_nonvoter(node.id, _as);
+                            co_await _group0.set_voter_status(node.id, can_vote::no, _as);
                         }
                     }
                 }
@@ -2153,7 +2175,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                     // We make a replaced node a non-voter early, just like a removed node.
                     auto replaced_node_id = parse_replaced_node(node.req_param);
                     if (_group0.is_member(replaced_node_id, true)) {
-                        co_await _group0.make_nonvoter(replaced_node_id, _as);
+                        co_await _group0.set_voter_status(replaced_node_id, can_vote::no, _as);
                     }
                 }
                 utils::get_local_injector().inject("crash_coordinator_before_stream", [] { abort(); });
@@ -3044,11 +3066,11 @@ future<> topology_coordinator::build_coordinator_state(group0_guard guard) {
     rtlogger.info("building initial raft topology state and CDC generation");
     guard = co_await start_operation();
 
-    auto get_application_state = [&] (locator::host_id host_id, gms::inet_address ep, const gms::application_state_map& epmap, gms::application_state app_state) -> sstring {
+    auto get_application_state = [&] (locator::host_id host_id, const gms::application_state_map& epmap, gms::application_state app_state) -> sstring {
         const auto it = epmap.find(app_state);
         if (it == epmap.end()) {
-            throw std::runtime_error(format("failed to build initial raft topology state from gossip for node {}/{}: application state {} is missing in gossip",
-                    host_id, ep, app_state));
+            throw std::runtime_error(format("failed to build initial raft topology state from gossip for node {}: application state {} is missing in gossip",
+                    host_id, app_state));
         }
         // it's versioned_value::value(), not std::optional::value() - it does not throw
         return it->second.value();
@@ -3056,17 +3078,13 @@ future<> topology_coordinator::build_coordinator_state(group0_guard guard) {
 
     // Create a new CDC generation
     auto get_sharding_info_for_host_id = [&] (locator::host_id host_id) -> std::pair<size_t, uint8_t> {
-        const auto ep = tmptr->get_endpoint_for_host_id_if_known(host_id);
-        if (!ep) {
-            throw std::runtime_error(format("IP of node with ID {} is not known", host_id));
-        }
-        const auto eptr = _gossiper.get_endpoint_state_ptr(*ep);
+        const auto eptr = _gossiper.get_endpoint_state_ptr(host_id);
         if (!eptr) {
-            throw std::runtime_error(format("no gossiper endpoint state for node {}/{}", host_id, *ep));
+            throw std::runtime_error(format("no gossiper endpoint state for node {}", host_id));
         }
         const auto& epmap = eptr->get_application_state_map();
-        const auto shard_count = std::stoi(get_application_state(host_id, *ep, epmap, gms::application_state::SHARD_COUNT));
-        const auto ignore_msb = std::stoi(get_application_state(host_id, *ep, epmap, gms::application_state::IGNORE_MSB_BITS));
+        const auto shard_count = std::stoi(get_application_state(host_id, epmap, gms::application_state::SHARD_COUNT));
+        const auto ignore_msb = std::stoi(get_application_state(host_id, epmap, gms::application_state::IGNORE_MSB_BITS));
         return std::make_pair<size_t, uint8_t>(shard_count, ignore_msb);
     };
     auto [cdc_gen_uuid, guard_, mutation] = co_await prepare_and_broadcast_cdc_generation_data(tmptr, std::move(guard), std::nullopt, get_sharding_info_for_host_id);
@@ -3083,23 +3101,22 @@ future<> topology_coordinator::build_coordinator_state(group0_guard guard) {
         }
 
         const auto& host_id = node.get().host_id();
-        const auto& ep = node.get().endpoint();
-        const auto eptr = _gossiper.get_endpoint_state_ptr(ep);
+        const auto eptr = _gossiper.get_endpoint_state_ptr(host_id);
         if (!eptr) {
-            throw std::runtime_error(format("failed to build initial raft topology state from gossip for node {}/{} as gossip contains no data for it", host_id, ep));
+            throw std::runtime_error(format("failed to build initial raft topology state from gossip for node {} as gossip contains no data for it", host_id));
         }
 
         const auto& epmap = eptr->get_application_state_map();
 
-        const auto datacenter = get_application_state(host_id, ep, epmap, gms::application_state::DC);
-        const auto rack = get_application_state(host_id, ep, epmap, gms::application_state::RACK);
+        const auto datacenter = get_application_state(host_id, epmap, gms::application_state::DC);
+        const auto rack = get_application_state(host_id, epmap, gms::application_state::RACK);
         const auto tokens_v = tmptr->get_tokens(host_id);
         const std::unordered_set<dht::token> tokens(tokens_v.begin(), tokens_v.end());
-        const auto release_version = get_application_state(host_id, ep, epmap, gms::application_state::RELEASE_VERSION);
+        const auto release_version = get_application_state(host_id, epmap, gms::application_state::RELEASE_VERSION);
         const auto num_tokens = tokens.size();
-        const auto shard_count = get_application_state(host_id, ep, epmap, gms::application_state::SHARD_COUNT);
-        const auto ignore_msb = get_application_state(host_id, ep, epmap, gms::application_state::IGNORE_MSB_BITS);
-        const auto supported_features_s = get_application_state(host_id, ep, epmap, gms::application_state::SUPPORTED_FEATURES);
+        const auto shard_count = get_application_state(host_id, epmap, gms::application_state::SHARD_COUNT);
+        const auto ignore_msb = get_application_state(host_id, epmap, gms::application_state::IGNORE_MSB_BITS);
+        const auto supported_features_s = get_application_state(host_id, epmap, gms::application_state::SUPPORTED_FEATURES);
         const auto supported_features = gms::feature_service::to_feature_set(supported_features_s);
 
         if (enabled_features.empty()) {

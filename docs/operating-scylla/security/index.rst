@@ -14,11 +14,14 @@ Security
    authorization
    certificate-authentication
    rbac-usecase
+   auditing
    client-node-encryption
    node-node-encryption
    generate-certificate
    saslauthd
-      
+   encryption-at-rest
+   ldap-authentication
+   ldap-authorization
 
 .. panel-box::
   :title: Security
@@ -26,6 +29,7 @@ Security
   :class: my-panel
    
   * :doc:`ScyllaDB Security Checklist </operating-scylla/security/security-checklist/>`
+  * :doc:`ScyllaDB Auditing Guide </operating-scylla/security/auditing/>`
 
 .. panel-box::
   :title: Authentication and Authorization
@@ -50,6 +54,6 @@ Security
   * :doc:`Encryption: Data in Transit Client to Node </operating-scylla/security/client-node-encryption/>`
   * :doc:`Encryption: Data in Transit Node to Node </operating-scylla/security/node-node-encryption/>`
   * :doc:`Generating a self-signed Certificate Chain Using openssl </operating-scylla/security/generate-certificate/>`
-  * `Encryption at Rest <https://enterprise.docs.scylladb.com/stable/operating-scylla/security/encryption-at-rest.html>`_ available in `ScyllaDB Enterprise <https://enterprise.docs.scylladb.com/>`_
+  * :doc:`Encryption at Rest </operating-scylla/security/encryption-at-rest>`
 
 Also check out the `Security Features lesson <https://university.scylladb.com/courses/scylla-operations/lessons/security-features/topic/security-features/>`_ on ScyllaDB University.

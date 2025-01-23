@@ -3,13 +3,14 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 
 #include <boost/test/unit_test.hpp>
 #include <boost/intrusive/parent_from_member.hpp>
 #include <algorithm>
+#include <deque>
 
 #include <seastar/core/circular_buffer.hh>
 #include <seastar/core/format.hh>

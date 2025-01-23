@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -67,7 +67,7 @@ private:
 public:
     task_manager_module(tasks::task_manager& tm, service::storage_service& ss) noexcept;
 
-    virtual std::set<gms::inet_address> get_nodes() const noexcept override;
+    virtual std::set<gms::inet_address> get_nodes() const override;
 };
 
 }

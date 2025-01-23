@@ -3,13 +3,15 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <seastar/coroutine/maybe_yield.hh>
 
 #include "mutation_query.hh"
 #include "schema/schema_registry.hh"
+
+#include <boost/range/algorithm/equal.hpp>
 
 reconcilable_result::~reconcilable_result() {}
 

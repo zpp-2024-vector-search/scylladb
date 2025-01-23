@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #include <random>
@@ -14,6 +14,7 @@
 
 #include <fmt/ranges.h>
 #include <seastar/core/sleep.hh>
+#include <seastar/coroutine/maybe_yield.hh>
 #include <seastar/util/defer.hh>
 #include "gms/inet_address.hh"
 #include "inet_address_vectors.hh"
@@ -104,13 +105,13 @@ namespace {
 
 
 template<size_t N>
-utils::small_vector<locator::host_id, N> addr_vector_to_id(const locator::topology& topo, const utils::small_vector<gms::inet_address, N>& set) {
+utils::small_vector<locator::host_id, N> addr_vector_to_id(const gms::gossiper& g, const utils::small_vector<gms::inet_address, N>& set) {
     return set | std::views::transform([&] (gms::inet_address ip) {
-        auto* node = topo.find_node(ip);
-        if (!node) {
+        try {
+            return g.get_host_id(ip);
+        } catch (...) {
             on_internal_error(slogger, fmt::format("addr_vector_to_id cannot map {} to host id", ip));
         }
-        return node->host_id();
     }) | std::ranges::to<utils::small_vector<locator::host_id, N>>();
 }
 
@@ -183,10 +184,6 @@ locator::host_id storage_proxy::my_host_id(const locator::effective_replication_
     // real id from the db), so before id is knows erm return zero id as dst for queries and it has to match
     // whatever my_host_id/is_me/only_me uses as local id.
     return erm.get_topology().my_host_id();
-}
-
-bool storage_proxy::is_me(gms::inet_address addr) const noexcept {
-    return local_db().get_token_metadata().get_topology().is_me(addr);
 }
 
 bool storage_proxy::is_me(const locator::effective_replication_map& erm, locator::host_id id) const noexcept {
@@ -474,7 +471,9 @@ public:
     }
 
     future<> send_truncate_blocking(sstring keyspace, sstring cfname, std::chrono::milliseconds timeout_in_ms) {
-        if (!_gossiper.get_unreachable_token_owners().empty()) {
+        auto s = _sp.local_db().find_schema(keyspace, cfname);
+        auto erm_ptr = s->table().get_effective_replication_map();
+        if (!std::ranges::all_of(erm_ptr->get_token_metadata().get_normal_token_owners(), std::bind_front(&storage_proxy::is_alive, &_sp, std::cref(*erm_ptr)))) {
             slogger.info("Cannot perform truncate, some hosts are down");
             // Since the truncate operation is so aggressive and is typically only
             // invoked by an admin, for simplicity we require that all nodes are up
@@ -588,7 +587,7 @@ private:
         }
 
         auto reply_to_host_id = reply_to_id ? *reply_to_id : _gossiper.get_host_id(reply_to);
-        auto forward_host_id = forward_id ? std::move(*forward_id) : addr_vector_to_id(_sp._shared_token_metadata.get()->get_topology(), forward);
+        auto forward_host_id = forward_id ? std::move(*forward_id) : addr_vector_to_id(_gossiper, forward);
 
         if (reply_to_id) {
             _gossiper.get_mutable_address_map().opt_add_entry(reply_to_host_id, reply_to);
@@ -1057,7 +1056,9 @@ private:
     void connection_dropped(gms::inet_address addr, std::optional<locator::host_id> id) {
         slogger.debug("Drop hit rate info for {} because of disconnect", addr);
         if (!id) {
-            id = _sp.get_token_metadata_ptr()->get_host_id_if_known(addr);
+            try {
+                id = _gossiper.get_host_id(addr);
+            } catch (...) {}
         }
         if (!id) {
             return;
@@ -1245,8 +1246,7 @@ public:
             tracing::trace_state_ptr tr_state) override {
         auto m = _mutations[hid];
         if (m) {
-            const auto ep = ermptr->get_token_metadata().get_endpoint_for_host_id(hid);
-            return hm.store_hint(hid, ep, _schema, std::move(m), tr_state);
+            return hm.store_hint(hid, _schema, std::move(m), tr_state);
         } else {
             return false;
         }
@@ -1304,8 +1304,7 @@ public:
     }
     virtual bool store_hint(db::hints::manager& hm, locator::host_id hid, locator::effective_replication_map_ptr ermptr,
             tracing::trace_state_ptr tr_state) override {
-        const auto ep = ermptr->get_token_metadata().get_endpoint_for_host_id(hid);
-        return hm.store_hint(hid, ep, _schema, _mutation, tr_state);
+        return hm.store_hint(hid, _schema, _mutation, tr_state);
     }
     virtual future<> apply_locally(storage_proxy& sp, storage_proxy::clock_type::time_point timeout,
             tracing::trace_state_ptr tr_state, db::per_partition_rate_limit::info rate_limit_info,
@@ -1510,7 +1509,7 @@ protected:
     size_t _total_block_for = 0;
     db::write_type _type;
     std::unique_ptr<mutation_holder> _mutation_holder;
-    host_id_vector_replica_set _targets; // who we sent this mutation to
+    host_id_vector_replica_set _targets; // who we sent this mutation to and still pending response
     // added dead_endpoints as a member here as well. This to be able to carry the info across
     // calls in helper methods in a convenient way. Since we hope this will be empty most of the time
     // it should not be a huge burden. (flw)
@@ -1528,6 +1527,7 @@ protected:
     timer<storage_proxy::clock_type> _expire_timer;
     service_permit _permit; // holds admission permit until operation completes
     db::per_partition_rate_limit::info _rate_limit_info;
+    db::view::update_backlog _view_backlog; // max view update backlog of all participating targets
 
 protected:
     virtual bool waited_for(locator::host_id from) = 0;
@@ -1549,7 +1549,7 @@ public:
             , _effective_replication_map_ptr(std::move(erm))
             , _trace_state(trace_state), _cl(cl), _type(type), _mutation_holder(std::move(mh)), _targets(std::move(targets)),
               _dead_endpoints(std::move(dead_endpoints)), _stats(stats), _expire_timer([this] { timeout_cb(); }), _permit(std::move(permit)),
-              _rate_limit_info(rate_limit_info) {
+              _rate_limit_info(rate_limit_info), _view_backlog(max_backlog()) {
         // original comment from cassandra:
         // during bootstrap, include pending endpoints in the count
         // or we may fail the consistency level guarantees (see #833, #8058)
@@ -1738,8 +1738,7 @@ public:
     // Calculates how much to delay completing the request. The delay adds to the request's inherent latency.
     template<typename Func>
     void delay(tracing::trace_state_ptr trace, Func&& on_resume) {
-        auto backlog = max_backlog();
-        auto delay = db::view::calculate_view_update_throttling_delay(backlog, _expire_timer.get_timeout(), _proxy->data_dictionary().get_config().view_flow_control_delay_limit_in_ms());
+        auto delay = db::view::calculate_view_update_throttling_delay(_view_backlog, _expire_timer.get_timeout(), _proxy->data_dictionary().get_config().view_flow_control_delay_limit_in_ms());
         stats().last_mv_flow_control_delay = delay;
         stats().mv_flow_control_delay += delay.count();
         if (delay.count() == 0) {
@@ -1749,7 +1748,7 @@ public:
             ++stats().throttled_base_writes;
             ++stats().total_throttled_base_writes;
             tracing::trace(trace, "Delaying user write due to view update backlog {}/{} by {}us",
-                          backlog.get_current_bytes(), backlog.get_max_bytes(), delay.count());
+                          _view_backlog.get_current_bytes(), _view_backlog.get_max_bytes(), delay.count());
             // Waited on indirectly.
             (void)sleep_abortable<seastar::steady_clock_type>(delay).finally([self = shared_from_this(), on_resume = std::forward<Func>(on_resume)] {
                 --self->stats().throttled_base_writes;
@@ -3389,7 +3388,7 @@ storage_proxy::create_write_response_handler_helper(schema_ptr s, const dht::tok
     live_endpoints.reserve(all.size());
     dead_endpoints.reserve(all.size());
     std::partition_copy(all.begin(), all.end(), std::back_inserter(live_endpoints),
-            std::back_inserter(dead_endpoints), std::bind_front(&storage_proxy::is_alive_id, this, std::cref(*erm)));
+            std::back_inserter(dead_endpoints), std::bind_front(&storage_proxy::is_alive, this, std::cref(*erm)));
 
     db::per_partition_rate_limit::info rate_limit_info;
     if (allow_limit && _db.local().can_apply_per_partition_rate_limit(*s, db::operation_type::write)) {
@@ -3766,7 +3765,7 @@ storage_proxy::get_paxos_participants(const sstring& ks_name, const locator::eff
 
     auto all_as_spans = std::array{std::span(natural_endpoints), std::span(pending_endpoints)};
     std::ranges::copy(all_as_spans | std::views::join |
-            std::views::filter(std::bind_front(&storage_proxy::is_alive_id, this, std::cref(erm))), std::back_inserter(live_endpoints));
+            std::views::filter(std::bind_front(&storage_proxy::is_alive, this, std::cref(erm))), std::back_inserter(live_endpoints));
 
     if (live_endpoints.size() < required_participants) {
         throw exceptions::unavailable_exception(cl_for_paxos, required_participants, live_endpoints.size());
@@ -4016,7 +4015,7 @@ storage_proxy::mutate_atomically_result(std::vector<mutation> mutations, db::con
                                     std::ranges::to<std::unordered_set<locator::host_id>>());
                             }
                             auto local_rack = topology.get_rack();
-                            auto chosen_endpoints = endpoint_filter(std::bind_front(&storage_proxy::is_alive_id, &_p, std::cref(*_ermp)), local_addr,
+                            auto chosen_endpoints = endpoint_filter(std::bind_front(&storage_proxy::is_alive, &_p, std::cref(*_ermp)), local_addr,
                                                                     local_rack, local_token_owners);
 
                             if (chosen_endpoints.empty()) {
@@ -4170,7 +4169,7 @@ future<> storage_proxy::send_to_endpoint(
                 std::array{std::span(pending_endpoints), std::span(target.begin(), target.end())} | std::views::join,
                 std::inserter(targets, targets.begin()),
                 std::back_inserter(dead_endpoints),
-                std::bind_front(&storage_proxy::is_alive_id, this, std::cref(*erm)));
+                std::bind_front(&storage_proxy::is_alive, this, std::cref(*erm)));
         slogger.trace("Creating write handler with live: {}; dead: {}", targets, dead_endpoints);
         db::assure_sufficient_live_nodes(cl, *erm, targets, pending_endpoints);
         return create_write_response_handler(
@@ -4398,7 +4397,7 @@ size_t storage_proxy::hint_to_dead_endpoints(std::unique_ptr<mutation_holder>& m
     }
 }
 
-future<result<>> storage_proxy::schedule_repair(locator::effective_replication_map_ptr ermp, std::unordered_map<dht::token, std::unordered_map<locator::host_id, std::optional<mutation>>> diffs, db::consistency_level cl, tracing::trace_state_ptr trace_state,
+future<result<>> storage_proxy::schedule_repair(locator::effective_replication_map_ptr ermp, mutations_per_partition_key_map diffs, db::consistency_level cl, tracing::trace_state_ptr trace_state,
                                         service_permit permit) {
     if (diffs.empty()) {
         return make_ready_future<result<>>(bo::success());
@@ -4704,7 +4703,7 @@ class data_read_resolver : public abstract_read_resolver {
     bool _all_reached_end = true;
     query::short_read _is_short_read;
     std::vector<reply> _data_results;
-    std::unordered_map<dht::token, std::unordered_map<locator::host_id, std::optional<mutation>>> _diffs;
+    mutations_per_partition_key_map _diffs;
 private:
     void on_timeout() override {
         fail_request(read_timeout_exception(_schema->ks_name(), _schema->cf_name(), _cl, response_count(), _targets_count, response_count() != 0));
@@ -4911,7 +4910,8 @@ private:
         return got_incomplete_information_across_partitions(s, cmd, last_row, rp, versions, is_reversed);
     }
 public:
-    data_read_resolver(schema_ptr schema, db::consistency_level cl, size_t targets_count, storage_proxy::clock_type::time_point timeout) : abstract_read_resolver(std::move(schema), cl, targets_count, timeout) {
+    data_read_resolver(schema_ptr schema, db::consistency_level cl, size_t targets_count, storage_proxy::clock_type::time_point timeout) : abstract_read_resolver(std::move(schema), cl, targets_count, timeout),
+    _diffs(10, partition_key::hashing(*_schema), partition_key::equality(*_schema)) {
         _data_results.reserve(targets_count);
     }
     void add_mutate_data(locator::host_id from, foreign_ptr<lw_shared_ptr<reconcilable_result>> result) {
@@ -4956,7 +4956,7 @@ public:
     bool all_reached_end() const {
         return _all_reached_end;
     }
-    future<std::optional<reconcilable_result>> resolve(schema_ptr schema, const query::read_command& cmd, uint64_t original_row_limit, uint64_t original_per_partition_limit,
+    future<std::optional<reconcilable_result>> resolve(const query::read_command& cmd, uint64_t original_row_limit, uint64_t original_per_partition_limit,
             uint32_t original_partition_limit) {
         SCYLLA_ASSERT(_data_results.size());
 
@@ -4968,10 +4968,10 @@ public:
             co_return reconcilable_result(p->row_count(), p->partitions(), p->is_short_read());
         }
 
-        const auto& s = *schema;
+        const auto& schema = *_schema;
 
         // return true if lh > rh
-        auto cmp = [&s](reply& lh, reply& rh) {
+        auto cmp = [&schema](reply& lh, reply& rh) {
             if (lh.result->partitions().size() == 0) {
                 return false; // reply with empty partition array goes to the end of the sorted array
             } else if (rh.result->partitions().size() == 0) {
@@ -4979,7 +4979,7 @@ public:
             } else {
                 auto lhk = lh.result->partitions().back().mut().key();
                 auto rhk = rh.result->partitions().back().mut().key();
-                return lhk.ring_order_tri_compare(s, rhk) > 0;
+                return lhk.ring_order_tri_compare(schema, rhk) > 0;
             }
         };
 
@@ -5009,7 +5009,7 @@ public:
             v.reserve(_targets_count);
             for (reply& r : _data_results) {
                 auto pit = r.result->partitions().rbegin();
-                if (pit != r.result->partitions().rend() && pit->mut().key().legacy_equal(s, max_key)) {
+                if (pit != r.result->partitions().rend() && pit->mut().key().legacy_equal(schema, max_key)) {
                     bool reached_partition_end = pit->row_count() < cmd.slice.partition_row_limit();
                     v.emplace_back(r.from, std::move(*pit), r.reached_end, reached_partition_end);
                     r.result->partitions().pop_back();
@@ -5030,12 +5030,11 @@ public:
             auto it = std::ranges::find_if(v, [] (auto&& ver) {
                     return bool(ver.par);
             });
-            auto m = mutation(schema, it->par->mut().key());
+            auto m = mutation(_schema, it->par->mut().key());
             for (const version& ver : v) {
                 if (ver.par) {
                     mutation_application_stats app_stats;
-                    co_await apply_gently(m.partition(), *schema, ver.par->mut().partition(), *schema, app_stats);
-                    co_await coroutine::maybe_yield();
+                    co_await apply_gently(m.partition(), schema, ver.par->mut().partition(), schema, app_stats);
                 }
             }
             auto live_row_count = m.live_row_count();
@@ -5048,34 +5047,31 @@ public:
 
         bool has_diff = false;
 
-        // calculate differences
+        // Сalculate differences: iterate over the versions from all the nodes and calculate the difference with the reconciled result.
         for (auto z : std::views::zip(versions, reconciled_partitions)) {
             const mutation& m = std::get<1>(z).mut;
             for (const version& v : std::get<0>(z)) {
                 auto diff = v.par
-                          ? m.partition().difference(*schema, (co_await unfreeze_gently(v.par->mut(), schema)).partition())
-                          : mutation_partition(*schema, m.partition());
+                          ? m.partition().difference(schema, (co_await unfreeze_gently(v.par->mut(), _schema)).partition())
+                          : mutation_partition(schema, m.partition());
                 std::optional<mutation> mdiff;
                 if (!diff.empty()) {
                     has_diff = true;
-                    mdiff = mutation(schema, m.decorated_key(), std::move(diff));
+                    mdiff = mutation(_schema, m.decorated_key(), std::move(diff));
                 }
-                if (auto [it, added] = _diffs[m.token()].try_emplace(v.from, std::move(mdiff)); !added) {
-                    // should not really happen, but lets try to deal with it
-                    if (mdiff) {
-                        if (it->second) {
-                            it->second.value().apply(std::move(mdiff.value()));
-                        } else {
-                            it->second = std::move(mdiff);
-                        }
-                    }
+                if (auto [it, added] = _diffs[m.key()].try_emplace(v.from, std::move(mdiff)); !added) {
+                    // A collision could happen only in 2 cases:
+                    // 1. We have 2 versions for the same node.
+                    // 2. `versions` (and or) `reconciled_partitions` are not unique per partition key.
+                    // Both cases are not possible unless there is a bug in the reconcilliation code.
+                    on_internal_error(slogger, fmt::format("Partition key conflict, key: {}, node: {}, table: {}.", m.key(), v.from, schema.ks_name()));
                 }
                 co_await coroutine::maybe_yield();
             }
         }
 
         if (has_diff) {
-            if (got_incomplete_information(*schema, cmd, original_row_limit, original_per_partition_limit,
+            if (got_incomplete_information(schema, cmd, original_row_limit, original_per_partition_limit,
                                            original_partition_limit, reconciled_partitions, versions)) {
                 co_return std::nullopt;
             }
@@ -5364,7 +5360,7 @@ protected:
                     on_read_resolved();
                     co_return;
                 }
-                auto rr_opt = co_await data_resolver->resolve(_schema, *cmd, original_row_limit(), original_per_partition_row_limit(), original_partition_limit()); // reconciliation happens here
+                auto rr_opt = co_await data_resolver->resolve(*cmd, original_row_limit(), original_per_partition_row_limit(), original_partition_limit()); // reconciliation happens here
 
                 // We generate a retry if at least one node reply with count live columns but after merge we have less
                 // than the total number of column we are interested in (which may be < count on a retry).
@@ -6600,7 +6596,7 @@ future<bool> storage_proxy::cas(schema_ptr schema, shared_ptr<cas_request> reque
 
 host_id_vector_replica_set storage_proxy::get_live_endpoints(const locator::effective_replication_map& erm, const dht::token& token) const {
     host_id_vector_replica_set eps = erm.get_natural_replicas(token);
-    auto itend = std::ranges::remove_if(eps, std::not_fn(std::bind_front(&storage_proxy::is_alive_id, this, std::cref(erm)))).begin();
+    auto itend = std::ranges::remove_if(eps, std::not_fn(std::bind_front(&storage_proxy::is_alive, this, std::cref(erm)))).begin();
     eps.erase(itend, eps.end());
     return eps;
 }
@@ -6610,18 +6606,22 @@ void storage_proxy::sort_endpoints_by_proximity(const locator::effective_replica
         return;
     }
     auto my_id = my_host_id(erm);
-    erm.get_topology().sort_by_proximity(my_id, ids);
-    // FIXME: before dynamic snitch is implement put local address (if present) at the beginning
-    auto it = std::ranges::find(ids, my_id);
-    if (it != ids.end() && it != ids.begin()) {
-        std::iter_swap(it, ids.begin());
+    const auto& topology = erm.get_topology();
+    if (topology.can_sort_by_proximity()) {
+        topology.do_sort_by_proximity(my_id, ids);
+    } else {
+        // FIXME: before dynamic snitch is implemented put local address (if present) at the beginning
+        auto it = std::ranges::find(ids, my_id);
+        if (it != ids.end() && it != ids.begin()) {
+            std::iter_swap(it, ids.begin());
+        }
     }
 }
 
 host_id_vector_replica_set storage_proxy::get_endpoints_for_reading(const sstring& ks_name, const locator::effective_replication_map& erm, const dht::token& token) const {
     auto endpoints = erm.get_replicas_for_reading(token);
     validate_read_replicas(erm, endpoints);
-    auto it = std::ranges::remove_if(endpoints, std::not_fn(std::bind_front(&storage_proxy::is_alive_id, this, std::cref(erm)))).begin();
+    auto it = std::ranges::remove_if(endpoints, std::not_fn(std::bind_front(&storage_proxy::is_alive, this, std::cref(erm)))).begin();
     endpoints.erase(it, endpoints.end());
     sort_endpoints_by_proximity(erm, endpoints);
     return endpoints;
@@ -6658,11 +6658,7 @@ storage_proxy::filter_replicas_for_read(
     return filter_replicas_for_read(cl, erm, live_endpoints, preferred_endpoints, db::read_repair_decision::NONE, nullptr, cf);
 }
 
-bool storage_proxy::is_alive(const gms::inet_address& ep) const {
-    return _remote ? _remote->is_alive(ep) : is_me(ep);
-}
-
-bool storage_proxy::is_alive_id(const locator::effective_replication_map& erm, const locator::host_id& ep) const {
+bool storage_proxy::is_alive(const locator::effective_replication_map& erm, const locator::host_id& ep) const {
     return is_me(erm, ep) || (_remote ? _remote->is_alive(ep) : false);
 }
 
@@ -6793,7 +6789,7 @@ const db::hints::host_filter& storage_proxy::get_hints_host_filter() const {
     return _hints_manager.get_host_filter();
 }
 
-future<db::hints::sync_point> storage_proxy::create_hint_sync_point(std::vector<gms::inet_address> target_hosts) const {
+future<db::hints::sync_point> storage_proxy::create_hint_sync_point(std::vector<locator::host_id> target_hosts) const {
     db::hints::sync_point spoint;
     spoint.regular_per_shard_rps.resize(smp::count);
     spoint.mv_per_shard_rps.resize(smp::count);

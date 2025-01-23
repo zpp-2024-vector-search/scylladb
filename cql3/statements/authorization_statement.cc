@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #include "authorization_statement.hh"
@@ -13,9 +13,6 @@
 #include "auth/resource.hh"
 #include "cql3/query_processor.hh"
 #include "exceptions/exceptions.hh"
-#include <boost/algorithm/string/join.hpp>
-#include <boost/algorithm/string/split.hpp>
-#include <boost/algorithm/string/classification.hpp>
 #include "db/cql_type_parser.hh"
 #include "auth/common.hh"
 
@@ -79,3 +76,8 @@ bool cql3::statements::authorization_altering_statement::needs_guard(
                 query_processor& qp, service::query_state&) const {
     return !auth::legacy_mode(qp);
 };
+
+audit::statement_category cql3::statements::authorization_statement::category() const {
+    return audit::statement_category::DCL;
+}
+

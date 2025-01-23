@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #include <seastar/core/coroutine.hh>
@@ -90,6 +90,10 @@ future<std::tuple<::shared_ptr<schema_altering_statement::event_t>, cql3::cql_wa
     auto [ret, muts, cql_warnings] = co_await prepare_schema_mutations(qp, options, mc.write_timestamp());
     mc.add_mutations(std::move(muts));
     co_return std::make_tuple(ret, cql_warnings);
+}
+
+audit::statement_category schema_altering_statement::category() const {
+    return audit::statement_category::DDL;
 }
 
 }

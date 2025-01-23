@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #include <fmt/format.h>
@@ -259,7 +259,7 @@ cql3::statements::alter_keyspace_statement::prepare_schema_mutations(query_proce
 
 std::unique_ptr<cql3::statements::prepared_statement>
 cql3::statements::alter_keyspace_statement::prepare(data_dictionary::database db, cql_stats& stats) {
-    return std::make_unique<prepared_statement>(make_shared<alter_keyspace_statement>(*this));
+    return std::make_unique<prepared_statement>(audit_info(), make_shared<alter_keyspace_statement>(*this));
 }
 
 

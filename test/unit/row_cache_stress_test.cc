@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <boost/range/irange.hpp>
@@ -21,6 +21,7 @@
 #include "test/lib/memtable_snapshot_source.hh"
 #include <seastar/core/reactor.hh>
 #include <fmt/core.h>
+#include <fmt/std.h>
 
 static thread_local bool cancelled = false;
 

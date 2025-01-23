@@ -1,7 +1,7 @@
 #
 # Copyright (C) 2022-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 """
 Test consistency of schema changes with topology changes.
@@ -365,8 +365,7 @@ async def start_writes_to_cdc_table(cql: Session, concurrency: int = 3):
 
         stream_to_timestamp = { stream: gen.time for gen in generations for stream in gen.streams}
 
-        # FIXME: Doesn't work with all_pages=True (https://github.com/scylladb/scylladb/issues/19101)
-        cdc_log = await cql.run_async(f"SELECT * FROM {ks_name}.tbl_scylla_cdc_log", all_pages=False)
+        cdc_log = await cql.run_async(f"SELECT * FROM {ks_name}.tbl_scylla_cdc_log", all_pages=True)
         for log_entry in cdc_log:
             assert log_entry.cdc_stream_id in stream_to_timestamp
             timestamp = stream_to_timestamp[log_entry.cdc_stream_id]

@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #pragma once
@@ -66,6 +66,12 @@ public:
     /// The name of the key to be used for the password part of password authentication with \ref authenticate.
     ///
     static const sstring PASSWORD_KEY;
+
+    /// Service for SASL authentication.
+    static const sstring SERVICE_KEY;
+
+    /// Realm for SASL authentication.
+    static const sstring REALM_KEY;
 
     using credentials_map = std::unordered_map<sstring, sstring>;
 

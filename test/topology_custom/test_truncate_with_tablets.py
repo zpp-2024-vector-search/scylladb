@@ -1,7 +1,7 @@
 #
 # Copyright (C) 2024-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 from cassandra.query import SimpleStatement, ConsistencyLevel
 from cassandra.protocol import InvalidRequest
@@ -168,7 +168,6 @@ async def test_truncate_while_node_restart(manager: ManagerClient):
     assert row[0].count == 0
 
 
-@pytest.mark.xfail(reason="issue #21719")
 @pytest.mark.asyncio
 @skip_mode('release', 'error injections are not supported in release mode')
 async def test_truncate_with_coordinator_crash(manager: ManagerClient):

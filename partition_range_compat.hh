@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 
@@ -67,7 +67,7 @@ wrap(const std::vector<interval<T>>& v) {
         ret.emplace_back(v.back().start(), v.front().end());
         return ret;
     }
-    return boost::copy_range<std::vector<wrapping_interval<T>>>(v);
+    return v | std::ranges::to<std::vector<wrapping_interval<T>>>();
 }
 
 template <typename T>
@@ -81,8 +81,7 @@ wrap(std::vector<interval<T>>&& v) {
         ret.emplace_back(std::move(v.back()).start(), std::move(v.front()).end());
         return ret;
     }
-    // want boost::adaptor::moved ...
-    return boost::copy_range<std::vector<wrapping_interval<T>>>(v);
+    return std::ranges::owning_view(std::move(v)) | std::ranges::to<std::vector>();
 }
 
 inline

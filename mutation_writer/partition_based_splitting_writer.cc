@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "mutation_writer/partition_based_splitting_writer.hh"
@@ -12,6 +12,7 @@
 #include "replica/memtable.hh"
 
 #include <seastar/core/coroutine.hh>
+#include <seastar/core/when_all.hh>
 
 namespace mutation_writer {
 

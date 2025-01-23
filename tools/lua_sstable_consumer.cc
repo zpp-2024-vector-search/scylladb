@@ -3,11 +3,10 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "utils/assert.hh"
-#include <boost/algorithm/string/join.hpp>
 #include <fmt/chrono.h>
 #include <lua.hpp>
 #include <seastar/core/fstream.hh>

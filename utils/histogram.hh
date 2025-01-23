@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -12,7 +12,6 @@
 #include "latency.hh"
 #include <cmath>
 #include <seastar/core/timer.hh>
-#include <iosfwd>
 #include "seastarx.hh"
 #include "estimated_histogram.hh"
 

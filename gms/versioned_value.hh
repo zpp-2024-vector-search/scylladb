@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #pragma once
@@ -19,6 +19,7 @@
 #include "service/state_id.hh"
 #include "version.hh"
 #include "cdc/generation_id.hh"
+#include <set>
 #include <unordered_set>
 
 namespace gms {

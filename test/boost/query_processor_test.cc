@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 
@@ -14,7 +14,8 @@
 #include <iterator>
 #include <stdint.h>
 
-#include "test/lib/scylla_test_case.hh"
+#undef SEASTAR_TESTING_MAIN
+#include <seastar/testing/test_case.hh>
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/cql_assertions.hh"
 #include "test/lib/test_utils.hh"
@@ -24,6 +25,8 @@
 #include "transport/messages/result_message.hh"
 #include "cql3/query_processor.hh"
 #include "cql3/untyped_result_set.hh"
+
+BOOST_AUTO_TEST_SUITE(query_processor_test)
 
 SEASTAR_TEST_CASE(test_execute_internal_insert) {
     return do_with_cql_env([] (auto& e) {
@@ -181,8 +184,8 @@ std::unordered_map<sstring, uint64_t> get_query_metrics() {
     const auto values = all_metrics->values[distance(cbegin(all_metadata), qp_group)];
     std::vector<sstring> labels;
     for (const auto& metric : qp_group->metrics) {
-        const auto found = metric.id.labels().find("consistency_level");
-        BOOST_REQUIRE(found != metric.id.labels().cend());
+        const auto found = metric.labels().find("consistency_level");
+        BOOST_REQUIRE(found != metric.labels().cend());
         labels.push_back(found->second);
     }
     BOOST_REQUIRE(values.size() == level_count);
@@ -354,3 +357,5 @@ SEASTAR_TEST_CASE(test_select_full_scan_metrics) {
         BOOST_CHECK_EQUAL(stat_ps8, qp.get_cql_stats().select_partition_range_scan);
     });
 }
+
+BOOST_AUTO_TEST_SUITE_END()

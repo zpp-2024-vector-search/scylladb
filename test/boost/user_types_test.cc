@@ -3,10 +3,11 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-#include "test/lib/scylla_test_case.hh"
+#undef SEASTAR_TESTING_MAIN
+#include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/cql_assertions.hh"
@@ -19,7 +20,8 @@
 #include "db/config.hh"
 
 #include <fmt/ranges.h>
-#include <boost/algorithm/string/join.hpp>
+
+BOOST_AUTO_TEST_SUITE(user_types_test)
 
 // Specifies that the given 'cql' query fails with the 'msg' message.
 // Requires a cql_test_env. The caller must be inside thread.
@@ -671,3 +673,5 @@ SEASTAR_TEST_CASE(test_cql3_name_without_frozen) {
         BOOST_REQUIRE(list_type_ptr->cql3_type_name_without_frozen() == list_type_name);
     });
 }
+
+BOOST_AUTO_TEST_SUITE_END()

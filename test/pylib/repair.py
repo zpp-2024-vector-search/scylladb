@@ -1,7 +1,7 @@
 #
 # Copyright (C) 2024-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 
 from test.pylib.util import wait_for_cql_and_get_hosts
@@ -28,11 +28,13 @@ async def load_tablet_repair_time(cql, hosts, table_id):
 
     return repair_time_map
 
-async def create_table_insert_data_for_repair(manager, rf = 3 , tablets = 8, fast_stats_refresh = True, nr_keys = 256):
+async def create_table_insert_data_for_repair(manager, rf = 3 , tablets = 8, fast_stats_refresh = True, nr_keys = 256, disable_flush_cache_time = False):
     if fast_stats_refresh:
         config = {'error_injections_at_startup': ['short_tablet_stats_refresh_interval']}
     else:
         config = {}
+    if disable_flush_cache_time:
+        config.update({'repair_hints_batchlog_flush_cache_time_in_ms': 0})
     servers = [await manager.server_add(config=config), await manager.server_add(config=config), await manager.server_add(config=config)]
     cql = manager.get_cql()
     await cql.run_async("CREATE KEYSPACE test WITH replication = {{'class': 'NetworkTopologyStrategy', "
@@ -44,3 +46,13 @@ async def create_table_insert_data_for_repair(manager, rf = 3 , tablets = 8, fas
     logging.info(f'Got hosts={hosts}');
     table_id = await manager.get_table_id("test", "test")
     return (servers, cql, hosts, table_id)
+
+async def get_tablet_task_id(cql, host, table_id, token):
+    rows = await cql.run_async(f"SELECT last_token, repair_task_info from system.tablets where table_id = {table_id}", host=host)
+    for row in rows:
+        if row.last_token == token:
+            if row.repair_task_info == None:
+                return None
+            else:
+                return str(row.repair_task_info.tablet_task_id)
+    return None

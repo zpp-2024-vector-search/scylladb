@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -14,6 +14,7 @@
 #include "exceptions.hh"
 #include "sstables/partition_index_cache.hh"
 #include <seastar/util/bool_class.hh>
+#include <seastar/core/when_all.hh>
 #include "tracing/traced_file.hh"
 #include "sstables/scanning_clustered_index_cursor.hh"
 #include "sstables/mx/bsearch_clustered_cursor.hh"

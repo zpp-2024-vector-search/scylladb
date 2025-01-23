@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <seastar/core/on_internal_error.hh>
@@ -39,6 +39,54 @@
 constexpr int32_t schema::NAME_LENGTH;
 
 extern logging::logger dblog;
+
+sstring
+speculative_retry::to_sstring() const {
+    if (_t == type::NONE) {
+        return "NONE";
+    } else if (_t == type::ALWAYS) {
+        return "ALWAYS";
+    } else if (_t == type::CUSTOM) {
+        return format("{:.2f}ms", _v);
+    } else if (_t == type::PERCENTILE) {
+        return format("{:.1f}PERCENTILE", 100 * _v);
+    } else {
+        throw std::invalid_argument(format("unknown type: {:d}\n", uint8_t(_t)));
+    }
+}
+
+speculative_retry
+speculative_retry::from_sstring(sstring str) {
+    std::transform(str.begin(), str.end(), str.begin(), ::toupper);
+
+    sstring ms("MS");
+    sstring percentile("PERCENTILE");
+
+    auto convert = [&str] (sstring& t) {
+        try {
+            return boost::lexical_cast<double>(str.substr(0, str.size() - t.size()));
+        } catch (boost::bad_lexical_cast& e) {
+            throw std::invalid_argument(format("cannot convert {} to speculative_retry\n", str));
+        }
+    };
+
+    type t;
+    double v = 0;
+    if (str == "NONE") {
+        t = type::NONE;
+    } else if (str == "ALWAYS") {
+        t = type::ALWAYS;
+    } else if (str.compare(str.size() - ms.size(), ms.size(), ms) == 0) {
+        t = type::CUSTOM;
+        v = convert(ms);
+    } else if (str.compare(str.size() - percentile.size(), percentile.size(), percentile) == 0) {
+        t = type::PERCENTILE;
+        v = convert(percentile) / 100;
+    } else {
+        throw std::invalid_argument(format("cannot convert {} to speculative_retry\n", str));
+    }
+    return speculative_retry(t, v);
+}
 
 sstring to_sstring(column_kind k) {
     switch (k) {
@@ -533,6 +581,7 @@ bool operator==(const schema& x, const schema& y)
         && indirect_equal_to<std::unique_ptr<::view_info>>()(x._view_info, y._view_info)
         && x._raw._indices_by_name == y._raw._indices_by_name
         && x._raw._is_counter == y._raw._is_counter
+        && x._raw._in_memory == y._raw._in_memory
         ;
 }
 
@@ -791,6 +840,7 @@ auto fmt::formatter<schema>::format(const schema& s, fmt::format_context& ctx) c
     out = fmt::format_to(out, ",speculativeRetry={}", s._raw._speculative_retry.to_sstring());
     out = fmt::format_to(out, ",triggers=[]");
     out = fmt::format_to(out, ",isDense={}", s._raw._is_dense);
+    out = fmt::format_to(out, ",in_memory={}", s._raw._in_memory);
     out = fmt::format_to(out, ",version={}", s.version());
 
     out = fmt::format_to(out, ",droppedColumns={{");
@@ -1950,8 +2000,16 @@ schema_ptr schema::make_reversed() const {
 }
 
 schema_ptr schema::get_reversed() const {
-    return local_schema_registry().get_or_load(reversed(_raw._version), [this] (table_schema_version) {
-        return frozen_schema(make_reversed());
+    return local_schema_registry().get_or_load(reversed(_raw._version), [this] (table_schema_version) -> base_and_view_schemas {
+        auto s = make_reversed();
+
+        if (s->is_view()) {
+            if (!s->view_info()->base_info()) {
+                on_internal_error(dblog, format("Tried to make a reverse schema for view {}.{} with an uninitialized base info", s->ks_name(), s->cf_name()));
+            }
+            return {frozen_schema(s), s->view_info()->base_info()->base_schema()};
+        }
+        return {frozen_schema(s)};
     });
 }
 

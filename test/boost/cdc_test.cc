@@ -3,15 +3,18 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <fmt/core.h>
 #include <seastar/util/defer.hh>
-#include "test/lib/scylla_test_case.hh"
+#undef SEASTAR_TESTING_MAIN
+#include <seastar/testing/test_case.hh>
+#include <seastar/testing/thread_test_case.hh>
 #include <string>
 #include <boost/range/adaptor/map.hpp>
 #include <fmt/ranges.h>
+#include <fmt/std.h>
 
 #include "cdc/log.hh"
 #include "cdc/cdc_options.hh"
@@ -41,6 +44,8 @@ namespace cdc {
 api::timestamp_type find_timestamp(const mutation&);
 utils::UUID generate_timeuuid(api::timestamp_type);
 }
+
+BOOST_AUTO_TEST_SUITE(cdc_test)
 
 SEASTAR_THREAD_TEST_CASE(test_find_mutation_timestamp) {
     do_with_cql_env_thread([] (cql_test_env& e) {
@@ -373,6 +378,8 @@ SEASTAR_THREAD_TEST_CASE(test_cdc_log_schema) {
     }).get();
 }
 
+} // cdc_test namespace
+
 static std::vector<std::vector<bytes_opt>> to_bytes(const cql_transport::messages::result_message::rows& rows) {
     auto rs = rows.rs().result_set().rows();
     std::vector<std::vector<bytes_opt>> results;
@@ -425,6 +432,8 @@ static auto select_log(cql_test_env& e, const sstring& table_name) {
     BOOST_REQUIRE(rows);
     return rows;
 };
+
+namespace cdc_test {
 
 SEASTAR_THREAD_TEST_CASE(test_primary_key_logging) {
     do_with_cql_env_thread([](cql_test_env& e) {
@@ -1305,6 +1314,8 @@ SEASTAR_THREAD_TEST_CASE(test_update_insert_delete_distinction) {
     }).get();
 }
 
+} // namespace cdc_test
+
 static std::vector<std::vector<data_value>> get_result(cql_test_env& e,
         const std::vector<data_type>& col_types, const sstring& query) {
     auto deser = [] (const data_type& t, const bytes_opt& b) -> data_value {
@@ -1329,6 +1340,8 @@ static std::vector<std::vector<data_value>> get_result(cql_test_env& e,
     }
     return res;
 }
+
+namespace cdc_test {
 
 SEASTAR_THREAD_TEST_CASE(test_change_splitting) {
     do_with_cql_env_thread([](cql_test_env& e) {
@@ -2077,3 +2090,5 @@ SEASTAR_THREAD_TEST_CASE(test_image_deleted_column) {
         perform_test(true);
     }).get();
 }
+
+BOOST_AUTO_TEST_SUITE_END()

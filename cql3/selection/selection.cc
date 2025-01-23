@@ -5,12 +5,11 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #include <boost/range/algorithm/equal.hpp>
 #include <boost/range/algorithm/transform.hpp>
-#include <boost/range/adaptor/reversed.hpp>
 
 #include "cql3/selection/selection.hh"
 #include "cql3/selection/raw_selector.hh"
@@ -382,7 +381,7 @@ protected:
                     .clustering_key = rs.current_clustering_key,
                     .static_and_regular_columns = rs.current,
                     .selection = &_sel,
-                    .options = nullptr,
+                    .options = rs._options,
                     .static_and_regular_timestamps = rs._timestamps,
                     .static_and_regular_ttls = rs._ttls,
                     .temporaries = {},
@@ -516,6 +515,7 @@ selection::collect_metadata(const schema& schema, const std::vector<prepared_sel
 }
 
 result_set_builder::result_set_builder(const selection& s, gc_clock::time_point now,
+                                       const query_options* options,
                                        std::vector<size_t> group_by_cell_indices,
                                        uint64_t limit, uint64_t per_partition_limit)
     : _result_set(std::make_unique<result_set>(::make_shared<metadata>(*(s.get_result_metadata()))))
@@ -527,6 +527,7 @@ result_set_builder::result_set_builder(const selection& s, gc_clock::time_point 
     , _per_partition_remaining_previous_partition(per_partition_limit)
     , _last_group(_group_by_cell_indices.size())
     , _group_began(false)
+    , _options(options)
     , _now(now)
 {
     if (s._collect_timestamps) {

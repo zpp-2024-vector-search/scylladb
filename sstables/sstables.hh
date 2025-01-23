@@ -4,7 +4,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -53,6 +53,8 @@ class cached_file;
 namespace data_dictionary {
 class storage_options;
 }
+
+class in_memory_config_type;
 
 namespace db {
 class large_data_handler;
@@ -710,6 +712,8 @@ private:
     size_t total_memory_reclaimed() const;
     // Reload components from which memory was previously reclaimed
     future<> reload_reclaimed_components();
+    // Disable reload of components for this sstable
+    void disable_component_memory_reload();
 
 public:
     // Finds first position_in_partition in a given partition.
@@ -780,6 +784,10 @@ private:
     void write_toc(file_writer w);
 public:
     future<> read_toc() noexcept;
+
+    shareable_components& get_shared_components() const {
+        return *_components;
+    }
 
     schema_ptr get_schema() const {
         return _schema;
@@ -1044,6 +1052,8 @@ public:
 
     future<std::optional<uint32_t>> read_digest();
     future<lw_shared_ptr<checksum>> read_checksum();
+
+    friend in_memory_config_type;
 };
 
 // Validate checksums

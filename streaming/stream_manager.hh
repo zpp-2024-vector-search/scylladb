@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #pragma once
@@ -190,6 +190,10 @@ private:
 
 public:
     void update_finished_percentage(streaming::stream_reason reason, float percentage);
+
+    uint32_t throughput_mbs() const noexcept {
+        return _io_throughput_mbs.get();
+    }
 };
 
 } // namespace streaming

@@ -449,8 +449,7 @@ selector returns [shared_ptr<raw_selector> s]
     : us=unaliasedSelector (K_AS c=ident { alias = c; })? { $s = ::make_shared<raw_selector>(std::move(us), alias); }
     ;
 
-unaliasedSelector returns [uexpression s]
-    @init { uexpression tmp; }
+unaliasedSelector returns [uexpression tmp]
     :  ( c=cident                                  { tmp = unresolved_identifier{std::move(c)}; }
        | K_COUNT '(' countArgument ')'             { tmp = make_count_rows_function_expression(); }
        | K_WRITETIME '(' c=cident ')'              { tmp = column_mutation_attribute{column_mutation_attribute::attribute_kind::writetime,
@@ -460,8 +459,9 @@ unaliasedSelector returns [uexpression s]
        | f=functionName args=selectionFunctionArgs { tmp = function_call{std::move(f), std::move(args)}; }
        | K_CAST      '(' arg=unaliasedSelector K_AS t=native_type ')'  { tmp = cast{.style = cast::cast_style::sql, .arg = std::move(arg), .type = std::move(t)}; }
        )
-       ( '.' fi=cident { tmp = field_selection{std::move(tmp), std::move(fi)}; } )*
-    { $s = tmp; }
+       ( '.' fi=cident { tmp = field_selection{std::move(tmp), std::move(fi)}; }
+       | '[' sub=term ']' { tmp = subscript{std::move(tmp), std::move(sub)}; }
+       )*
     ;
 
 selectionFunctionArgs returns [std::vector<expression> a]
@@ -1785,6 +1785,13 @@ columnCondition returns [uexpression e]
                             oper_t::IN,
                             std::move(values));
                 }
+        | K_NOT K_IN
+            values=singleColumnInValuesOrMarkerExpr {
+                    e = binary_operator(
+                            std::move(key),
+                            oper_t::NOT_IN,
+                            std::move(values));
+                }
         )
     ;
 
@@ -1835,6 +1842,14 @@ relation returns [uexpression e]
         { $e = binary_operator(unresolved_identifier{std::move(name)}, oper_t::IN, std::move(marker1)); }
     | name=cident K_IN in_values=singleColumnInValues
         { $e = binary_operator(unresolved_identifier{std::move(name)}, oper_t::IN,
+        collection_constructor {
+            .style = collection_constructor::style_type::list,
+            .elements = std::move(in_values)
+        }); }
+    | name=cident K_NOT K_IN marker1=marker
+        { $e = binary_operator(unresolved_identifier{std::move(name)}, oper_t::NOT_IN, std::move(marker1)); }
+    | name=cident K_NOT K_IN in_values=singleColumnInValues
+        { $e = binary_operator(unresolved_identifier{std::move(name)}, oper_t::NOT_IN,
         collection_constructor {
             .style = collection_constructor::style_type::list,
             .elements = std::move(in_values)
@@ -2110,6 +2125,7 @@ basic_unreserved_keyword returns [sstring str]
         | K_SERVICE_LEVELS
         | K_ATTACHED
         | K_FOR
+        | K_SHARES
         | K_GROUP
         | K_TIMEOUT
         | K_SERVICE
@@ -2318,6 +2334,7 @@ K_SERVICE: S E R V I C E;
 K_LEVEL: L E V E L;
 K_LEVELS: L E V E L S;
 K_EFFECTIVE: E F F E C T I V E;
+K_SHARES: S H A R E S;
 
 K_SCYLLA_TIMEUUID_LIST_INDEX: S C Y L L A '_' T I M E U U I D '_' L I S T '_' I N D E X;
 K_SCYLLA_COUNTER_SHARD_LIST: S C Y L L A '_' C O U N T E R '_' S H A R D '_' L I S T; 

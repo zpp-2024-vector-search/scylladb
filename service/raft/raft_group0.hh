@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 #pragma once
 
@@ -11,6 +11,7 @@
 #include "service/raft/discovery.hh"
 #include "service/raft/group0_fwd.hh"
 #include "gms/feature.hh"
+#include "utils/updateable_value.hh"
 
 namespace cql3 { class query_processor; }
 
@@ -25,6 +26,9 @@ extern const char* const raft_upgrade_doc;
 class migration_manager;
 class raft_group0_client;
 class storage_service;
+
+struct can_vote_tag {};
+using can_vote = bool_class<can_vote_tag>;
 
 // Wrapper for `discovery` which persists the learned peers on disk.
 class persistent_discovery {
@@ -126,6 +130,7 @@ class raft_group0 {
     future<> leadership_monitor_fiber();
     future<> _leadership_monitor = make_ready_future<>();
     abort_source _leadership_monitor_as;
+    utils::updateable_value_source<bool> _leadership_observable;
 
 public:
     // Passed to `setup_group0` when replacing a node.
@@ -218,18 +223,17 @@ public:
     // `wait_for_raft` must've also been called earlier and returned `true`.
     future<> become_nonvoter(abort_source& as, std::optional<raft_timeout> timeout = std::nullopt);
 
-    // Make the given server, other than us, a non-voter in group 0.
+    // Set the voter status of the given server, other than us, in group 0.
     //
     // Assumes we've finished the startup procedure (`setup_group0()` finished earlier).
     // `wait_for_raft` must've also been called earlier and returned `true`.
-    future<> make_nonvoter(raft::server_id, abort_source&, std::optional<raft_timeout> timeout = std::nullopt);
+    future<> set_voter_status(raft::server_id, can_vote, abort_source&, std::optional<raft_timeout> timeout = std::nullopt);
 
-    // Make the given servers, other than us, a non-voter in group 0.
+    // Set the voter status of the given servers, other than us, in group 0.
     //
     // Assumes we've finished the startup procedure (`setup_group0()` finished earlier).
     // `wait_for_raft` must've also been called earlier and returned `true`.
-    future<> make_nonvoters(const std::unordered_set<raft::server_id>&, abort_source&,
-            std::optional<raft_timeout> timeout = std::nullopt);
+    future<> set_voters_status(const std::unordered_set<raft::server_id>&, can_vote, abort_source&, std::optional<raft_timeout> timeout = std::nullopt);
 
     // Remove ourselves from group 0.
     //
@@ -269,7 +273,7 @@ public:
     // It is meant to be used as a fallback when a proper handshake procedure
     // cannot be used (e.g. when completing the upgrade or group0 procedures
     // or when joining an old cluster which does not support JOIN_NODE RPC).
-    shared_ptr<group0_handshaker> make_legacy_handshaker(bool can_vote);
+    shared_ptr<group0_handshaker> make_legacy_handshaker(can_vote can_vote);
 
     // Waits until all upgrade to raft group 0 finishes and all nodes switched
     // to use_post_raft_procedures.
@@ -297,6 +301,8 @@ public:
 
     // Returns true after the group 0 server has been started.
     bool joined_group0() const;
+
+    utils::observer<bool> observe_leadership(std::function<void(bool)>);
 
     // Returns scheduling group group0 is configured to run with
     seastar::scheduling_group get_scheduling_group() {
@@ -372,9 +378,10 @@ private:
     // (we could then try restarting the server internally).
     future<> start_server_for_group0(raft::group_id group0_id, service::storage_service& ss, cql3::query_processor& qp, service::migration_manager& mm, bool topology_change_enabled);
 
-    // Make the given server a non-voter in Raft group 0 configuration.
+    // Modify the given server voter status in Raft group 0 configuration.
     // Retries on raft::commit_status_unknown.
-    future<> make_raft_config_nonvoter(const std::unordered_set<raft::server_id>&, abort_source& as, std::optional<raft_timeout> timeout = std::nullopt);
+    future<> modify_raft_voter_status(
+            const std::unordered_set<raft::server_id>&, can_vote, abort_source& as, std::optional<raft_timeout> timeout = std::nullopt);
 
     // Returns true if raft is enabled
     future<bool> use_raft();

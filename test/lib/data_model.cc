@@ -3,15 +3,13 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <algorithm>
 
 #include "utils/assert.hh"
 #include "test/lib/data_model.hh"
-
-#include <boost/algorithm/string/join.hpp>
 
 #include "schema/schema_builder.hh"
 #include "concrete_types.hh"
@@ -356,7 +354,7 @@ void table_description::rename_clustering_column(const sstring& from, const sstr
 
 table_description::table table_description::build() const {
     auto s = build_schema();
-    return { boost::algorithm::join(_change_log, "\n"), s, build_mutations(s) };
+    return { fmt::to_string(fmt::join(_change_log, "\n")), s, build_mutations(s) };
 }
 
 }

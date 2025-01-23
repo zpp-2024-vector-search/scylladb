@@ -4,7 +4,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <seastar/core/seastar.hh>
@@ -18,10 +18,12 @@
 #include "message/messaging_service.hh"
 #include "gms/gossiper.hh"
 #include "gms/application_state.hh"
+#include "service/qos/service_level_controller.hh"
 #include "utils/log.hh"
 #include <seastar/core/thread.hh>
 #include <chrono>
 #include "db/schema_tables.hh"
+
 
 namespace bpo = boost::program_options;
 
@@ -58,9 +60,11 @@ int main(int ac, char ** av) {
 
             sharded<abort_source> abort_sources;
             sharded<locator::shared_token_metadata> token_metadata;
+            sharded<utils::walltime_compressor_tracker> compressor_tracker;
             sharded<gms::feature_service> feature_service;
             sharded<gms::gossip_address_map> gossip_address_map;
             sharded<netw::messaging_service> messaging;
+            sharded<auth::service> auth_service;
 
             abort_sources.start().get();
             auto stop_abort_source = defer([&] { abort_sources.stop().get(); });
@@ -71,13 +75,24 @@ int main(int ac, char ** av) {
             tm_cfg.topo_cfg.this_cql_address = my_address;
             token_metadata.start([] () noexcept { return db::schema_tables::hold_merge_lock(); }, tm_cfg).get();
             auto stop_token_mgr = defer([&] { token_metadata.stop().get(); });
+            locator::shared_token_metadata tm({}, {});
+            sharded<qos::service_level_controller> sl_controller;
+            scheduling_group default_scheduling_group = create_scheduling_group("sl_default_sg", 1.0).get();
+            sharded<abort_source> as;
+            as.start().get();
+            auto stop_as = defer([&as] { as.stop().get(); });
+            sl_controller.start(std::ref(auth_service), std::ref(tm), std::ref(as), qos::service_level_options{.shares = 1000}, default_scheduling_group).get();
+            compressor_tracker.start([] { return utils::walltime_compressor_tracker::config{}; }).get();
+            auto stop_compressor_tracker = deferred_stop(compressor_tracker);
 
             auto cfg = gms::feature_config_from_db_config(db::config(), {});
             feature_service.start(cfg).get();
 
             gossip_address_map.start().get();
 
-            messaging.start(locator::host_id{}, listen, 7000, std::ref(feature_service), std::ref(gossip_address_map)).get();
+            messaging.start(locator::host_id{}, listen, 7000, std::ref(feature_service),
+                            std::ref(gossip_address_map), std::ref(compressor_tracker),
+                            std::ref(sl_controller)).get();
             auto stop_messaging = deferred_stop(messaging);
 
             gms::gossip_config gcfg;

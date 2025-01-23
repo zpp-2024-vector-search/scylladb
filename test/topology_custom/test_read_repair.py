@@ -1,7 +1,7 @@
 #
 # Copyright (C) 2023-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 
 import datetime
@@ -222,7 +222,10 @@ async def test_incremental_read_repair(data_class, workdir, manager):
 
     host1, host2 = await wait_for_cql_and_get_hosts(cql, [node1, node2], time.time() + 30)
 
-    cql.execute("CREATE KEYSPACE ks WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 2}")
+    # The test generates and uploads sstables, assuming their specific
+    # contents. These assumptions are not held with tablets, which
+    # distribute data among sstables differently than vnodes.
+    cql.execute("CREATE KEYSPACE ks WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 2} AND tablets = { 'enabled': false }")
     table_schema = f"CREATE TABLE ks.tbl ({data_class.column_spec}) WITH speculative_retry = 'NONE'"
     cql.execute(table_schema)
 

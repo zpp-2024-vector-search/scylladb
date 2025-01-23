@@ -3,13 +3,13 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 
 #include <string_view>
-#include "bytes.hh"
+#include "bytes_fwd.hh"
 
 std::string base64_encode(bytes_view);
 

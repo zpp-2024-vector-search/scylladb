@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <algorithm>
@@ -11,7 +11,6 @@
 #include "utils/assert.hh"
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/algorithm/string/split.hpp>
-#include <boost/algorithm/string/join.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/range/irange.hpp>
 #include <boost/range/algorithm_ext.hpp>
@@ -2106,9 +2105,7 @@ int scylla_fast_forward_main(int argc, char** argv) {
                         return make_ready_future();
                     });
 
-                    auto requested_test_groups = boost::copy_range<std::unordered_set<std::string>>(
-                            app.configuration()["run-tests"].as<std::vector<std::string>>()
-                    );
+                    auto requested_test_groups = app.configuration()["run-tests"].as<std::vector<std::string>>() | std::ranges::to<std::unordered_set>();
                     auto enabled_test_groups = test_groups | std::views::filter([&] (auto&& tc) {
                         return requested_test_groups.contains(tc.name);
                     });

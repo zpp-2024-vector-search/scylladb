@@ -3,10 +3,11 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #undef SEASTAR_TESTING_MAIN
+#include <fmt/std.h>
 #include "utils/to_string.hh"
 #include "replication.hh"
 

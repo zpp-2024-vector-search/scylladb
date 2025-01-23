@@ -4,7 +4,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #include <stdexcept>
@@ -13,8 +13,6 @@
 #include <malloc.h>
 #include <boost/regex.hpp>
 #include <filesystem>
-#include <boost/range/adaptor/map.hpp>
-#include <boost/range/adaptor/reversed.hpp>
 #include <unordered_map>
 #include <unordered_set>
 #include <exception>
@@ -106,7 +104,7 @@ db::commitlog::config db::commitlog::config::from_db_config(const db::config& cf
     c.mode = cfg.commitlog_sync() == "batch" ? sync_mode::BATCH : sync_mode::PERIODIC;
     c.extensions = &cfg.extensions();
     c.use_o_dsync = cfg.commitlog_use_o_dsync();
-    c.allow_going_over_size_limit = !cfg.commitlog_use_hard_size_limit();
+    c.allow_going_over_size_limit = false;
 
     if (cfg.commitlog_flush_threshold_in_mb() >= 0) {
         c.commitlog_flush_threshold_in_mb = cfg.commitlog_flush_threshold_in_mb();

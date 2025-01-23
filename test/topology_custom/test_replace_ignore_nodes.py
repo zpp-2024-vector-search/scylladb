@@ -1,7 +1,7 @@
 #
 # Copyright (C) 2023-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 import time
 import pytest
@@ -26,7 +26,8 @@ async def test_replace_ignore_nodes(manager: ManagerClient) -> None:
        Preferably run it only in one mode e.g. dev.
     """
     cfg = {'enable_user_defined_functions': False,
-           'force_gossip_topology_changes': True}
+           'force_gossip_topology_changes': True,
+           'enable_tablets': False}
     logger.info(f"Booting initial cluster")
     servers = [await manager.server_add(config=cfg) for _ in range(7)]
     s2_id = await manager.get_host_id(servers[2].server_id)

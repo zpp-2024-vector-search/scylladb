@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "utils/log.hh"
@@ -504,7 +504,7 @@ future<> parse(const schema& schema, sstable_version_types v, random_access_read
 
     // Positions are encoded in little-endian.
     auto b = buf.get();
-    s.positions = utils::chunked_vector<pos_type>();
+    s.positions.reserve(s.header.size + 1);
     while (s.positions.size() != s.header.size) {
         s.positions.push_back(seastar::read_le<pos_type>(b));
         b += sizeof(pos_type);
@@ -1551,6 +1551,15 @@ future<> sstable::reload_reclaimed_components() {
     _total_reclaimable_memory.reset();
     _total_memory_reclaimed -= _components->filter->memory_size();
     sstlog.info("Reloaded bloom filter of {}", get_filename());
+}
+
+void sstable::disable_component_memory_reload() {
+    if (total_reclaimable_memory_size() > 0) {
+        // should be called only when the components have been dropped already
+        on_internal_error(sstlog, "disable_component_memory_reload() called with reclaimable memory");
+    }
+
+    _total_memory_reclaimed = 0;
 }
 
 future<> sstable::load_metadata(sstable_open_config cfg, bool validate) noexcept {
@@ -3011,7 +3020,7 @@ sstable::compute_shards_for_this_sstable(const dht::sharder& sharder_) const {
         shards.insert(rpras->shard);
         rpras = sharder.next(*_schema);
     }
-    return boost::copy_range<std::vector<unsigned>>(shards);
+    return shards | std::ranges::to<std::vector>();
 }
 
 future<bool> sstable::has_partition_key(const utils::hashed_key& hk, const dht::decorated_key& dk) {

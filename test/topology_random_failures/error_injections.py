@@ -1,7 +1,7 @@
 #
 # Copyright (C) 2024-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 
 # - New items should be added to the end of the list
@@ -25,5 +25,13 @@ ERROR_INJECTIONS = (
     "stop_after_updating_cdc_generation",
     "stop_before_streaming",
     "stop_after_streaming",
+    "stop_after_bootstrapping_initial_raft_configuration",
+)
+
+# Error injections which can cause a node's hang due to some timeouts.
+ERROR_INJECTIONS_NODE_MAY_HANG = (
+    "stop_after_sending_join_node_request",
+    "stop_after_updating_cdc_generation",
+    "stop_before_streaming",
     "stop_after_bootstrapping_initial_raft_configuration",
 )

@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "repair.hh"
@@ -28,9 +28,7 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/classification.hpp>
-#include <boost/range/algorithm.hpp>
 #include <boost/range/algorithm_ext.hpp>
-#include <boost/range/adaptor/map.hpp>
 #include <boost/range/numeric.hpp>
 
 #include <fmt/ranges.h>
@@ -228,6 +226,7 @@ repair_neighbors::repair_neighbors(std::vector<locator::host_id> nodes, std::vec
 
 // Return all of the neighbors with whom we share the provided range.
 static std::vector<locator::host_id> get_neighbors(
+        const gms::gossiper& gossiper,
         const locator::effective_replication_map& erm,
         const sstring& ksname, query::range<dht::token> range,
         const std::vector<sstring>& data_centers,
@@ -284,17 +283,19 @@ static std::vector<locator::host_id> get_neighbors(
             } catch(...) {
                 throw std::runtime_error(format("Unknown host specified: {}", host));
             }
-            auto endpoint = erm.get_token_metadata().get_host_id_if_known(ip);
-            if (endpoint) {
+
+            try {
+                auto endpoint = gossiper.get_host_id(ip);
+
                 if (endpoint == my_address) {
                     found_me = true;
-                } else if (neighbor_set.contains(*endpoint)) {
-                    ret.push_back(*endpoint);
+                } else if (neighbor_set.contains(endpoint)) {
+                    ret.push_back(endpoint);
                     // If same host is listed twice, don't add it again later
-                    neighbor_set.erase(*endpoint);
-                } else {
-                    rlogger.warn("Provided host ip {} has no corespondent host id", ip);
+                    neighbor_set.erase(endpoint);
                 }
+            } catch (...) {
+                    rlogger.warn("Provided host ip {} has no corresponding host id", ip);
             }
             // Nodes which aren't neighbors for this range are ignored.
             // This allows the user to give a list of "good" nodes, where
@@ -331,6 +332,7 @@ static std::vector<locator::host_id> get_neighbors(
 }
 
 static future<std::list<locator::host_id>> get_hosts_participating_in_repair(
+        const gms::gossiper& gossiper,
         const locator::effective_replication_map& erm,
         const sstring& ksname,
         const dht::token_range_vector& ranges,
@@ -346,7 +348,7 @@ static future<std::list<locator::host_id>> get_hosts_participating_in_repair(
     participating_hosts.insert(my_address);
 
     co_await do_for_each(ranges, [&] (const dht::token_range& range) {
-        const auto nbs = get_neighbors(erm, ksname, range, data_centers, hosts, ignore_nodes);
+        const auto nbs = get_neighbors(gossiper, erm, ksname, range, data_centers, hosts, ignore_nodes);
         for (const auto& nb : nbs) {
             participating_hosts.insert(nb);
         }
@@ -533,9 +535,10 @@ size_t repair::task_manager_module::nr_running_repair_jobs() {
 }
 
 future<bool> repair::task_manager_module::is_aborted(const tasks::task_id& uuid, shard_id shard) {
-    return smp::submit_to(shard, [&] () {
-        auto it = get_local_tasks().find(uuid);
-        return it != get_local_tasks().end() && it->second->abort_requested();
+    return get_task_manager().container().invoke_on(shard, [name = get_name(), uuid] (tasks::task_manager& tm) {
+        auto module = tm.find_module(name);
+        auto it = module->get_local_tasks().find(uuid);
+        return it != module->get_local_tasks().end() && it->second->abort_requested();
     });
 }
 
@@ -616,7 +619,8 @@ repair::shard_repair_task_impl::shard_repair_task_impl(tasks::task_manager::modu
         bool hints_batchlog_flushed,
         bool small_table_optimization,
         std::optional<int> ranges_parallelism,
-        gc_clock::time_point flush_time)
+        gc_clock::time_point flush_time,
+        bool sched_by_scheduler)
     : repair_task_impl(module, id, 0, "shard", keyspace, "", "", parent_id_.uuid(), reason_)
     , rs(repair)
     , db(repair.get_db())
@@ -636,6 +640,7 @@ repair::shard_repair_task_impl::shard_repair_task_impl(tasks::task_manager::modu
     , _small_table_optimization(small_table_optimization)
     , _user_ranges_parallelism(ranges_parallelism ? std::optional<semaphore>(semaphore(*ranges_parallelism)) : std::nullopt)
     , _flush_time(flush_time)
+    , sched_by_scheduler(sched_by_scheduler)
 {
     rlogger.debug("repair[{}]: Setting user_ranges_parallelism to {}", global_repair_id.uuid(),
             _user_ranges_parallelism ? std::to_string(_user_ranges_parallelism->available_units()) : "unlimited");
@@ -677,7 +682,7 @@ void repair::shard_repair_task_impl::check_in_abort_or_shutdown() {
 
 repair_neighbors repair::shard_repair_task_impl::get_repair_neighbors(const dht::token_range& range) {
     return neighbors.empty() ?
-        repair_neighbors(get_neighbors(*erm, _status.keyspace, range, data_centers, hosts, ignore_nodes, _small_table_optimization)) :
+        repair_neighbors(get_neighbors(gossiper, *erm, _status.keyspace, range, data_centers, hosts, ignore_nodes, _small_table_optimization)) :
         neighbors[range];
 }
 
@@ -1307,7 +1312,7 @@ future<int> repair_service::do_repair_start(gms::gossip_address_map& addr_map, s
     }
 
     auto ranges_parallelism = options.ranges_parallelism == -1 ? std::nullopt : std::optional<int>(options.ranges_parallelism);
-    auto task = co_await _repair_module->make_and_start_task<repair::user_requested_repair_task_impl>({}, id, std::move(keyspace), "", germs, std::move(cfs), std::move(ranges), std::move(options.hosts), std::move(options.data_centers), std::move(ignore_nodes), small_table_optimization, ranges_parallelism);
+    auto task = co_await _repair_module->make_and_start_task<repair::user_requested_repair_task_impl>({}, id, std::move(keyspace), "", germs, std::move(cfs), std::move(ranges), std::move(options.hosts), std::move(options.data_centers), std::move(ignore_nodes), small_table_optimization, ranges_parallelism, _gossiper.local());
     co_return id.id;
 }
 
@@ -1332,7 +1337,7 @@ future<> repair::user_requested_repair_task_impl::run() {
             auto normal_nodes = germs->get().get_token_metadata().get_normal_token_owners();
             participants = std::list<locator::host_id>(normal_nodes.begin(), normal_nodes.end());
         } else {
-            participants = get_hosts_participating_in_repair(germs->get(), keyspace, ranges, data_centers, hosts, ignore_nodes).get();
+            participants = get_hosts_participating_in_repair(_gossiper, germs->get(), keyspace, ranges, data_centers, hosts, ignore_nodes).get();
         }
         auto [hints_batchlog_flushed, flush_time] = rs.flush_hints(id, keyspace, cfs, ignore_nodes).get();
 
@@ -1497,6 +1502,7 @@ future<> repair::data_sync_repair_task_impl::run() {
             "system_traces"
         };
         if (_reason == streaming::stream_reason::bootstrap ||
+            _reason == streaming::stream_reason::rebuild ||
             _reason == streaming::stream_reason::decommission) {
             small_table_optimization = small_table_optimization_enabled_ks.contains(keyspace);
         }
@@ -1902,7 +1908,7 @@ future<> repair_service::do_decommission_removenode_with_repair(locator::token_m
                         // Choose the decommission node n3 to run repair to
                         // sync with one of the replica nodes, e.g., n1, in the
                         // local DC.
-                        neighbors_set = get_neighbors_set(boost::copy_range<std::vector<locator::host_id>>(new_eps));
+                        neighbors_set = get_neighbors_set(new_eps | std::ranges::to<std::vector<locator::host_id>>());
                     }
                 } else {
                     throw std::runtime_error(fmt::format("{}: keyspace={}, range={}, current_replica_endpoints={}, new_replica_endpoints={}, wrong number of new owner node={}",
@@ -2146,11 +2152,11 @@ future<> repair_service::do_rebuild_replace_with_repair(std::unordered_map<sstri
                         return sync_nodes.contains(node);
                     }) | std::views::transform([&topology] (const auto& node) {
                         const auto& n = topology.get_node(node);
-                        return std::make_pair(n.host_id(), n.endpoint());
-                    }) | std::ranges::to<std::unordered_map>();
+                        return n.host_id();
+                    }) | std::ranges::to<std::vector>();
                 rlogger.debug("{}: keyspace={}, range={}, natural_enpoints={}, neighbors={}", op, keyspace_name, r, natural_eps, neighbors);
                 if (!neighbors.empty()) {
-                    range_sources[r] = repair_neighbors(neighbors);
+                    range_sources[r] = repair_neighbors(std::move(neighbors));
                     ++it;
                 } else {
                     // Skip the range with zero neighbors
@@ -2396,7 +2402,7 @@ future<> repair_service::repair_tablets(repair_uniq_id rid, sstring keyspace_nam
 }
 
 // It is called by the repair_tablet rpc verb to repair the given tablet
-future<> repair_service::repair_tablet(gms::gossip_address_map& addr_map, locator::tablet_metadata_guard& guard, locator::global_tablet_id gid) {
+future<gc_clock::time_point> repair_service::repair_tablet(gms::gossip_address_map& addr_map, locator::tablet_metadata_guard& guard, locator::global_tablet_id gid) {
     auto id = _repair_module->new_repair_uniq_id();
     rlogger.debug("repair[{}]: Starting tablet repair global_tablet_id={}", id.uuid(), gid);
     auto& db = get_db().local();
@@ -2405,7 +2411,7 @@ future<> repair_service::repair_tablet(gms::gossip_address_map& addr_map, locato
 
     auto t = db.get_tables_metadata().get_table_if_exists(table_id);
     if (!t) {
-        co_return;
+        co_return gc_clock::now();
     }
     auto& tmap = guard.get_tablet_map();
     auto s = t->schema();
@@ -2434,16 +2440,21 @@ future<> repair_service::repair_tablet(gms::gossip_address_map& addr_map, locato
     auto ranges_parallelism = std::nullopt;
     auto start = std::chrono::steady_clock::now();
     task_metas.push_back(tablet_repair_task_meta{keyspace_name, table_name, table_id, master_shard_id, range, repair_neighbors(nodes, shards), replicas});
-    auto task = co_await _repair_module->make_and_start_task<repair::tablet_repair_task_impl>({}, id, keyspace_name, table_names, streaming::stream_reason::repair, std::move(task_metas), ranges_parallelism);
+    auto task_impl_ptr = seastar::make_shared<repair::tablet_repair_task_impl>(_repair_module, id, keyspace_name, table_names, streaming::stream_reason::repair, std::move(task_metas), ranges_parallelism);
+    task_impl_ptr->sched_by_scheduler = true;
+    auto task = co_await _repair_module->make_task(task_impl_ptr, {});
+    task->start();
     co_await task->done();
+    auto flush_time = task_impl_ptr->get_flush_time();
     auto delay = utils::get_local_injector().inject_parameter<uint32_t>("tablet_repair_add_delay_in_ms");
     if (delay) {
         rlogger.debug("Execute tablet_repair_add_delay_in_ms={}", *delay);
         co_await seastar::sleep(std::chrono::milliseconds(*delay));
     }
     auto duration = std::chrono::duration<float>(std::chrono::steady_clock::now()- start);
-    rlogger.info("repair[{}]: Finished tablet repair for table={}.{} range={} duration={} replicas={} global_tablet_id={}",
-            id.uuid(), keyspace_name, table_name, range, duration, replicas, gid);
+    rlogger.info("repair[{}]: Finished tablet repair for table={}.{} range={} duration={} replicas={} global_tablet_id={} flush_time={}",
+            id.uuid(), keyspace_name, table_name, range, duration, replicas, gid, flush_time);
+    co_return flush_time;
 }
 
 tasks::is_user_task repair::tablet_repair_task_impl::is_user_task() const noexcept {
@@ -2519,7 +2530,8 @@ future<> repair::tablet_repair_task_impl::run() {
         });
 
         auto parent_shard = this_shard_id();
-        rs.container().invoke_on_all([&idx, id, metas = _metas, parent_data, reason = _reason, tables = _tables, ranges_parallelism = _ranges_parallelism, parent_shard] (repair_service& rs) -> future<> {
+        std::vector<gc_clock::time_point> flush_times(smp::count);
+        rs.container().invoke_on_all([&idx, &flush_times, id, metas = _metas, parent_data, reason = _reason, tables = _tables, sched_by_scheduler = sched_by_scheduler, ranges_parallelism = _ranges_parallelism, parent_shard] (repair_service& rs) -> future<> {
             std::exception_ptr error;
             for (auto& m : metas) {
                 if (m.master_shard_id != this_shard_id()) {
@@ -2553,9 +2565,9 @@ future<> repair::tablet_repair_task_impl::run() {
 
                 auto task_impl_ptr = seastar::make_shared<repair::shard_repair_task_impl>(rs._repair_module, tasks::task_id::create_random_id(),
                         m.keyspace_name, rs, erm, std::move(ranges), std::move(table_ids), id, std::move(data_centers), std::move(hosts),
-                        std::move(ignore_nodes), reason, hints_batchlog_flushed, small_table_optimization, ranges_parallelism, flush_time);
+                        std::move(ignore_nodes), reason, hints_batchlog_flushed, small_table_optimization, ranges_parallelism, flush_time, sched_by_scheduler);
                 task_impl_ptr->neighbors = std::move(neighbors);
-                auto task = co_await rs._repair_module->make_task(std::move(task_impl_ptr), parent_data);
+                auto task = co_await rs._repair_module->make_task(task_impl_ptr, parent_data);
                 task->start();
                 auto res = co_await coroutine::as_future(task->done());
                 if (res.failed()) {
@@ -2573,11 +2585,19 @@ future<> repair::tablet_repair_task_impl::run() {
                         error = std::move(ep);
                     }
                 }
+                auto current = flush_times[this_shard_id()];
+                auto time = task_impl_ptr->get_flush_time();
+                flush_times[this_shard_id()] = current == gc_clock::time_point() ? time : std::min(current, time);
             }
             if (error) {
                 co_await coroutine::return_exception_ptr(std::move(error));
             }
         }).get();
+        for (auto& time : flush_times) {
+            if (time != gc_clock::time_point()) {
+                _flush_time = _flush_time == gc_clock::time_point() ? time : std::min(_flush_time, time);
+            }
+        }
         auto duration = std::chrono::duration<float>(std::chrono::steady_clock::now() - start_time);
         rlogger.info("repair[{}]: Finished user-requested repair for tablet keyspace={} tables={} repair_id={} tablets_repaired={} duration={}",
                 id.uuid(), _keyspace, _tables, id.id, _metas.size(), duration);

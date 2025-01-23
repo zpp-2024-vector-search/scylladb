@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -15,6 +15,7 @@ namespace qos {
 
     struct service_level_info {
         sstring name;
+        seastar::scheduling_group sg;
     };
     class qos_configuration_change_subscriber {
     public:

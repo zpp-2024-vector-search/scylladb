@@ -3,13 +3,14 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 
 #include "utils/assert.hh"
 #include <vector>
+#include <seastar/core/when_all.hh>
 #include "row_cache.hh"
 #include "mutation/mutation_fragment.hh"
 #include "query-request.hh"

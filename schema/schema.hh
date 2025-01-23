@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -14,7 +14,6 @@
 #include <optional>
 #include <unordered_map>
 #include <ranges>
-#include <boost/lexical_cast.hpp>
 #include <boost/dynamic_bitset.hpp>
 
 #include "cql3/column_specification.hh"
@@ -163,50 +162,8 @@ private:
 public:
     speculative_retry(type t, double v) : _t(t), _v(v) {}
 
-    sstring to_sstring() const {
-        if (_t == type::NONE) {
-            return "NONE";
-        } else if (_t == type::ALWAYS) {
-            return "ALWAYS";
-        } else if (_t == type::CUSTOM) {
-            return format("{:.2f}ms", _v);
-        } else if (_t == type::PERCENTILE) {
-            return format("{:.1f}PERCENTILE", 100 * _v);
-        } else {
-            throw std::invalid_argument(format("unknown type: {:d}\n", uint8_t(_t)));
-        }
-    }
-    static speculative_retry from_sstring(sstring str) {
-        std::transform(str.begin(), str.end(), str.begin(), ::toupper);
-
-        sstring ms("MS");
-        sstring percentile("PERCENTILE");
-
-        auto convert = [&str] (sstring& t) {
-            try {
-                return boost::lexical_cast<double>(str.substr(0, str.size() - t.size()));
-            } catch (boost::bad_lexical_cast& e) {
-                throw std::invalid_argument(format("cannot convert {} to speculative_retry\n", str));
-            }
-        };
-
-        type t;
-        double v = 0;
-        if (str == "NONE") {
-            t = type::NONE;
-        } else if (str == "ALWAYS") {
-            t = type::ALWAYS;
-        } else if (str.compare(str.size() - ms.size(), ms.size(), ms) == 0) {
-            t = type::CUSTOM;
-            v = convert(ms);
-        } else if (str.compare(str.size() - percentile.size(), percentile.size(), percentile) == 0) {
-            t = type::PERCENTILE;
-            v = convert(percentile) / 100;
-        } else {
-            throw std::invalid_argument(format("cannot convert {} to speculative_retry\n", str));
-        }
-        return speculative_retry(t, v);
-    }
+    sstring to_sstring() const;
+    static speculative_retry from_sstring(sstring str);
     type get_type() const {
         return _t;
     }
@@ -516,6 +473,9 @@ class partition_slice;
 class schema_extension {
 public:
     virtual ~schema_extension() {};
+    virtual future<> validate(const schema&) const {
+        return make_ready_future<>();
+    }
     virtual bytes serialize() const = 0;
     virtual bool is_placeholder() const {
         return false;
@@ -595,7 +555,7 @@ private:
         int32_t _memtable_flush_period = 0;
         ::speculative_retry _speculative_retry = ::speculative_retry(speculative_retry::type::PERCENTILE, 0.99);
         // This is the compaction strategy that will be used by default on tables which don't have one explicitly specified.
-        sstables::compaction_strategy_type _compaction_strategy = sstables::compaction_strategy_type::size_tiered;
+        sstables::compaction_strategy_type _compaction_strategy = sstables::compaction_strategy_type::incremental;
         std::map<sstring, sstring> _compaction_strategy_options;
         bool _compaction_enabled = true;
         ::caching_options _caching_options;
@@ -607,6 +567,7 @@ private:
         // Sharding info is not stored in the schema mutation and does not affect
         // schema digest. It is also not set locally on a schema tables.
         std::reference_wrapper<const dht::static_sharder> _sharder;
+        bool _in_memory = false;
         std::optional<raw_view_info> _view_info;
     };
     raw_schema _raw;
@@ -803,6 +764,10 @@ public:
     replica::table& table() const;
 
     bool has_custom_partitioner() const;
+
+    bool is_in_memory() const {
+        return _raw._in_memory;
+    }
 
     const column_definition* get_column_definition(const bytes& name) const;
     const column_definition& column_at(column_kind, column_id) const;

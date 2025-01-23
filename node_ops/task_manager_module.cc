@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "db/system_keyspace.hh"
@@ -56,7 +56,7 @@ static std::set<tasks::task_id> get_pending_ids(service::topology& topology) {
 
 static future<db::system_keyspace::topology_requests_entries> get_entries(db::system_keyspace& sys_ks, service::topology& topology, std::chrono::seconds ttl) {
     // Started requests.
-    auto entries = co_await sys_ks.get_topology_request_entries(db_clock::now() - ttl);
+    auto entries = co_await sys_ks.get_node_ops_request_entries(db_clock::now() - ttl);
 
     // Pending requests.
     for (auto& id : get_pending_ids(topology)) {
@@ -114,7 +114,7 @@ future<std::optional<tasks::virtual_task_hint>> node_ops_virtual_task::contains(
     }
 
     auto entry = co_await _ss._sys_ks.local().get_topology_request_entry(task_id.uuid(), false);
-    co_return bool(entry.id) ? empty_hint : std::nullopt;
+    co_return bool(entry.id) && entry.request_type ? empty_hint : std::nullopt;
 }
 
 future<tasks::is_abortable> node_ops_virtual_task::is_abortable(tasks::virtual_task_hint) const {
@@ -203,15 +203,8 @@ task_manager_module::task_manager_module(tasks::task_manager& tm, service::stora
     , _ss(ss)
 {}
 
-std::set<gms::inet_address> task_manager_module::get_nodes() const noexcept {
-    return std::ranges::join_view(std::to_array({
-            std::views::all(_ss._topology_state_machine._topology.normal_nodes),
-            std::views::all(_ss._topology_state_machine._topology.transition_nodes)})
-        ) | std::views::transform([&ss = _ss] (auto& node) {
-            return ss.host2ip(locator::host_id{node.first.uuid()});
-        }) | std::views::filter([&ss = _ss] (gms::inet_address ip) {
-            return ss._gossiper.is_alive(ip);
-        }) | std::ranges::to<std::set<gms::inet_address>>();
+std::set<gms::inet_address> task_manager_module::get_nodes() const {
+    return get_task_manager().get_nodes(_ss);
 }
 
 }

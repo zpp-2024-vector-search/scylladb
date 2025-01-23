@@ -4,7 +4,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #pragma once
@@ -108,7 +108,7 @@ public:
 
         bool use_o_dsync = false;
         bool warn_about_segments_left_on_disk_after_shutdown = true;
-        bool allow_going_over_size_limit = true;
+        bool allow_going_over_size_limit = false;
         bool allow_fragmented_entries = false;
 
         // The base segment ID to use.

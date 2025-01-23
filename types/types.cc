@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <boost/lexical_cast.hpp>
@@ -1194,6 +1194,7 @@ map_type_impl::deserialize(View in) const {
     return make_value(std::move(m));
 }
 template data_value map_type_impl::deserialize<>(ser::buffer_view<bytes_ostream::fragment_iterator>) const;
+template data_value map_type_impl::deserialize<>(managed_bytes_view) const;
 
 template <FragmentedView View>
 static void validate_aux(const map_type_impl& t, View v) {

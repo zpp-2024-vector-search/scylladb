@@ -1,7 +1,7 @@
 #
 # Copyright (C) 2024-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 from test.pylib.manager_client import ManagerClient
 
@@ -11,7 +11,7 @@ import asyncio
 import pytest
 from test.topology.conftest import skip_mode
 from test.pylib.util import wait_for_view, wait_for
-from test.topology_experimental_raft.test_mv_tablets import pin_the_only_tablet
+from test.topology_custom.test_mv_tablets import pin_the_only_tablet
 from test.pylib.tablets import get_tablet_replica
 
 logger = logging.getLogger(__name__)

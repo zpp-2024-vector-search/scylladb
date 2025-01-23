@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -11,7 +11,6 @@
 #include <seastar/core/rwlock.hh>
 #include <seastar/util/defer.hh>
 #include <seastar/util/noncopyable_function.hh>
-#include <seastar/core/coroutine.hh>
 
 #include <vector>
 

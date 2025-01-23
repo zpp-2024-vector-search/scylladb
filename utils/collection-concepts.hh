@@ -3,12 +3,11 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 #include <type_traits>
-#include <seastar/util/concepts.hh>
 #include <compare>
 
 template <typename Func, typename T>

@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #include "utils/assert.hh"
@@ -448,6 +448,8 @@ alter_table_statement::raw_statement::prepare(data_dictionary::database db, cql_
     std::optional<schema_ptr> s = t ? std::make_optional(t->schema()) : std::nullopt;
     std::optional<sstring> warning = check_restricted_table_properties(db, s, keyspace(), column_family(), *_properties);
     if (warning) {
+        // FIXME: should this warning be returned to the caller?
+        // See https://github.com/scylladb/scylladb/issues/20945
         mylogger.warn("{}", *warning);
     }
 
@@ -455,7 +457,7 @@ alter_table_statement::raw_statement::prepare(data_dictionary::database db, cql_
     auto prepared_attrs = _attrs->prepare(db, keyspace(), column_family());
     prepared_attrs->fill_prepare_context(ctx);
 
-    return std::make_unique<prepared_statement>(::make_shared<alter_table_statement>(
+    return std::make_unique<prepared_statement>(audit_info(), ::make_shared<alter_table_statement>(
                 ctx.bound_variables_size(),
                 *_cf_name,
                 _type,

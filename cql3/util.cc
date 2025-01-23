@@ -1,5 +1,5 @@
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 /* Copyright 2020-present ScyllaDB */
@@ -7,8 +7,6 @@
 #include "utils/assert.hh"
 #include "util.hh"
 #include "cql3/expr/expr-utils.hh"
-
-#include <boost/algorithm/string/join.hpp>
 
 #ifdef DEBUG
 

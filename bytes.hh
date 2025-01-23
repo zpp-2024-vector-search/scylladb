@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -19,6 +19,8 @@
 #include "bytes_fwd.hh"
 #include "utils/mutable_view.hh"
 #include "utils/simple_hashers.hh"
+
+using sstring_view = std::string_view;
 
 inline bytes to_bytes(bytes&& b) {
     return std::move(b);

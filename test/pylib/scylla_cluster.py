@@ -1,7 +1,7 @@
 #
 # Copyright (C) 2022-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 """Scylla clusters for testing.
    Provides helpers to setup and manage clusters of Scylla servers for testing.
@@ -20,7 +20,8 @@ import shutil
 import tempfile
 import time
 import traceback
-from typing import Any, Optional, Dict, List, Set, Tuple, Callable, AsyncIterator, NamedTuple, Union, NoReturn
+from typing import Any, Optional, Dict, List, Set, Tuple, Callable, AsyncIterator, NamedTuple, Union, NoReturn, \
+    Awaitable
 import uuid
 from io import BufferedWriter
 from test.pylib.host_registry import Host, HostRegistry
@@ -49,7 +50,6 @@ from cassandra.cluster import ExecutionProfile  # pylint: disable=no-name-in-mod
 from cassandra.cluster import EXEC_PROFILE_DEFAULT  # pylint: disable=no-name-in-module
 from cassandra.policies import WhiteListRoundRobinPolicy  # type: ignore
 from cassandra.connection import UnixSocketEndPoint
-
 
 io_executor = concurrent.futures.ThreadPoolExecutor(max_workers=20)
 
@@ -88,7 +88,7 @@ def make_scylla_conf(mode: str, workdir: pathlib.Path, host_addr: str, seed_addr
         'seed_provider': [{
             'class_name': 'org.apache.cassandra.locator.SimpleSeedProvider',
             'parameters': [{
-                'seeds': '{}'.format(','.join(seed_addrs))
+                'seeds': ','.join(seed_addrs)
                 }]
             }],
 
@@ -100,7 +100,8 @@ def make_scylla_conf(mode: str, workdir: pathlib.Path, host_addr: str, seed_addr
         'experimental_features': ['udf',
                                   'alternator-streams',
                                   'broadcast-tables',
-                                  'keyspace-storage-options'],
+                                  'keyspace-storage-options',
+                                  'views-with-tablets'],
 
         'skip_wait_for_gossip_to_settle': 0,
         'ring_delay_ms': 0,
@@ -301,7 +302,7 @@ class ScyllaServer:
         self.resources_certificate_file = self.resourcesdir / "scylla.crt"
         self.resources_keyfile_file = self.resourcesdir / "scylla.key"
 
-        if property_file and not "endpoint_snitch" in config_options:
+        if property_file and "endpoint_snitch" not in config_options:
             config_options["endpoint_snitch"] = "GossipingPropertyFileSnitch"
 
         # Sum of basic server configuration and the user-provided config options.
@@ -335,7 +336,7 @@ class ScyllaServer:
         if self.is_running:
             raise RuntimeError(f"Can't change seeds of a running server {self.ip_addr}.")
         self.seeds = seeds
-        self.config['seed_provider'][0]['parameters'][0]['seeds'] = '{}'.format(','.join(seeds))
+        self.config['seed_provider'][0]['parameters'][0]['seeds'] = ','.join(seeds)
         self._write_config_file()
 
     @property
@@ -707,15 +708,26 @@ class ScyllaServer:
             # this step to fail unconditionally.
             pass
         await self.shutdown_control_connection()
+
+        if self.cmd.returncode is not None:
+            # process has already exited
+            if self.cmd.returncode != 0:
+                self.logger.error("%s exited with non-zero status code: %d", self, self.cmd.returncode)
+            self.logger.info("stopped %s in %s", self, self.workdir.name)
+            self.cmd = None
+            return
+
         try:
             self.cmd.kill()
         except ProcessLookupError:
+            # the process *might* exit after checking for self.cmd.returncode
+            # and before self.cmd.kill() call. this is unlikely, but should not
+            # be considered as a failure.
             pass
         else:
             await self.cmd.wait()
         finally:
-            if self.cmd:
-                self.logger.info("stopped %s in %s", self, self.workdir.name)
+            self.logger.info("stopped %s in %s", self, self.workdir.name)
             self.cmd = None
 
     @stop_event
@@ -861,8 +873,8 @@ class ScyllaCluster:
         self.is_dirty = True
         self.logger.info("Uninstalling cluster %s", self)
         await self.stop()
-        await asyncio.gather(*(srv.uninstall() for srv in self.stopped.values()))
-        await asyncio.gather(*(self.host_registry.release_host(Host(ip))
+        await gather_safely(*(srv.uninstall() for srv in self.stopped.values()))
+        await gather_safely(*(self.host_registry.release_host(Host(ip))
                                for ip in self.leased_ips))
 
     async def release_ips(self) -> None:
@@ -885,7 +897,7 @@ class ScyllaCluster:
                 self.logger.info("Cluster %s stopping", self)
                 self.is_dirty = True
                 # If self.running is empty, no-op
-                await asyncio.gather(*(server.stop() for server in self.running.values()))
+                await gather_safely(*(server.stop() for server in self.running.values()))
                 self.stopped.update(self.running)
                 self.running.clear()
 
@@ -896,7 +908,7 @@ class ScyllaCluster:
             self.logger.info("Cluster %s stopping gracefully", self)
             self.is_dirty = True
             # If self.running is empty, no-op
-            await asyncio.gather(*(server.stop_gracefully() for server in self.running.values()))
+            await gather_safely(*(server.stop_gracefully() for server in self.running.values()))
             self.stopped.update(self.running)
             self.running.clear()
 
@@ -1012,7 +1024,7 @@ class ScyllaCluster:
         """Add multiple servers to the cluster concurrently"""
         assert servers_num > 0, f"add_servers: cannot add {servers_num} servers"
 
-        return await asyncio.gather(*(self.add_server(None, cmdline, config, property_file, start, seeds, server_encryption, expected_error)
+        return await gather_safely(*(self.add_server(None, cmdline, config, property_file, start, seeds, server_encryption, expected_error)
                                       for _ in range(servers_num)))
 
     def endpoint(self) -> str:
@@ -1286,6 +1298,7 @@ class ScyllaClusterManager:
         self.runner = aiohttp.web.AppRunner(app)
         self.tasks_history = dict()
         self.server_broken_event = asyncio.Event()
+        self.server_broken_reason = ""
 
     def repr_tasks_history(self):
         out = "Cluster_history"
@@ -1310,7 +1323,8 @@ class ScyllaClusterManager:
         self.current_test_case_full_name = f'{self.test_uname}::{test_case_name}'
         root_logger = logging.getLogger()
         # file handler file name should be consistent with topology/conftest.py:manager test_py_log_test variable
-        self.test_case_log_fh = logging.FileHandler(f"{self.base_dir}/{test_case_name}.log")
+        parent_test_name = self.test_uname.replace('/', '_')
+        self.test_case_log_fh = logging.FileHandler(f"{self.base_dir}/{parent_test_name}_{test_case_name}_cluster.log")
         self.test_case_log_fh.setLevel(root_logger.getEffectiveLevel())
         # to have the custom formatter with a timestamp that used in a test.py but for each testcase's log, we need to
         # extract it from the root logger and apply to the handler
@@ -1371,7 +1385,7 @@ class ScyllaClusterManager:
                 @wraps(handler)
                 async def inner_wrapper(request):
                     if blockable and self.server_broken_event.is_set():
-                        raise Exception("ScyllaClusterManager BROKEN, Previous test broke ScyllaClusterManager server")
+                        raise Exception(f"ScyllaClusterManager BROKEN, Previous test broke ScyllaClusterManager server, server_broken_reason: {self.server_broken_reason}")
                     self.logger.info("[ScyllaClusterManager][%s] %s", asyncio.current_task().get_name(), request.url)
                     self.tasks_history[asyncio.current_task()] = request
                     return await handler(request)
@@ -1491,11 +1505,12 @@ class ScyllaClusterManager:
         self.is_after_test_ok = True
         cluster_str = str(self.cluster)
 
-        return {"cluster_str":cluster_str, "server_broken":self.server_broken_event.is_set()}
+        return {"cluster_str":cluster_str, "server_broken":self.server_broken_event.is_set(), "message": self.server_broken_reason }
 
     def break_manager(self, reason, test):
         # make ScyllaClusterManager not operatable from client side
-        self.logger.error(" %s, test case {test} BROKE ScyllaClusterManager", reason)
+        self.server_broken_reason = f"{reason}, test case {test} BROKE ScyllaClusterManager"
+        self.logger.error(self.server_broken_reason)
         self.server_broken_event.set()
 
     async def _mark_dirty(self, _request) -> None:
@@ -1542,7 +1557,6 @@ class ScyllaClusterManager:
 
     async def _cluster_server_add(self, request) -> dict[str, object]:
         """Add a new server."""
-
         assert self.cluster
 
         data = await request.json()
@@ -1766,3 +1780,20 @@ async def get_cluster_manager(test_uname: str, clusters: Pool[ScyllaCluster], te
         yield manager
     finally:
         await manager.stop()
+
+
+async def gather_safely(*awaitables: Awaitable):
+    """
+    Developers using asyncio.gather() often assume that it waits for all futures (awaitables) givens.
+    But this isn't true when the return_exceptions parameter is False, which is the default.
+    In that case, as soon as one future completes with an exception, the gather() call will return this exception
+    immediately, and some of the finished tasks may continue to run in the background.
+    This is bad for applications that use gather() to ensure that a list of background tasks has all completed.
+    So such applications must use asyncio.gather() with return_exceptions=True, to wait for all given futures to
+    complete either successfully or unsuccessfully.
+    """
+    results = await asyncio.gather(*awaitables, return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result from None
+    return results

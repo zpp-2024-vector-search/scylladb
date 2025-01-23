@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -11,7 +11,6 @@
 #include "utils/assert.hh"
 #include <map>
 #include <seastar/core/future.hh>
-#include <seastar/core/future-util.hh>
 #include <seastar/core/gate.hh>
 #include <seastar/core/shared_future.hh>
 

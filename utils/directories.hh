@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -11,7 +11,7 @@
 #include <set>
 #include <vector>
 #include <seastar/core/future.hh>
-#include <seastar/core/smp.hh>
+#include <seastar/util/bool_class.hh>
 #include "utils/file_lock.hh"
 
 using namespace seastar;

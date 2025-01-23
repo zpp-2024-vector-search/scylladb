@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #include "secondary_index.hh"
@@ -13,7 +13,6 @@
 #include "cql3/statements/index_target.hh"
 
 #include <boost/regex.hpp>
-#include <boost/algorithm/string/join.hpp>
 #include <seastar/util/log.hh>
 
 #include "exceptions/exceptions.hh"

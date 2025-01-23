@@ -3,13 +3,12 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 
 #include <type_traits>
-#include <seastar/util/concepts.hh>
 #include "utils/assert.hh"
 #include "utils/bptree.hh"
 #include "utils/intrusive-array.hh"

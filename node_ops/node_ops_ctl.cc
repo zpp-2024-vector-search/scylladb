@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "db/config.hh"
@@ -143,7 +143,7 @@ future<> node_ops_ctl::abort_on_error(node_ops_cmd cmd, std::exception_ptr ex) n
 future<> node_ops_ctl::send_to_all(node_ops_cmd cmd) {
     req.cmd = cmd;
     req.ignore_nodes = ignore_nodes |
-            std::views::transform([&] (locator::host_id id) { return tmptr->get_endpoint_for_host_id(id); }) |
+            std::views::transform([&] (locator::host_id id) { return ss.gossiper().get_address_map().get(id); }) |
             std::ranges::to<std::list>();
     sstring op_desc = ::format("{}", cmd);
     nlogger.info("{}[{}]: Started {}", desc, uuid(), req);

@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -16,7 +16,6 @@
 #include "gms/inet_address.hh"
 #include <seastar/rpc/rpc_types.hh>
 #include <unordered_map>
-#include "gc_clock.hh"
 #include "interval.hh"
 #include "schema/schema_fwd.hh"
 #include "streaming/stream_fwd.hh"
@@ -25,6 +24,7 @@
 #include "service/maintenance_mode.hh"
 #include "gms/gossip_address_map.hh"
 #include "tasks/types.hh"
+#include "utils/advanced_rpc_compressor.hh"
 
 #include <list>
 #include <vector>
@@ -117,6 +117,10 @@ class group0_peer_exchange;
 namespace tasks {
 using get_children_request = task_id;
 using get_children_response = std::vector<task_id>;
+}
+
+namespace qos {
+    class service_level_controller;
 }
 
 namespace netw {
@@ -242,6 +246,7 @@ public:
     struct rpc_protocol_client_wrapper;
     struct rpc_protocol_server_wrapper;
     struct shard_info;
+    struct compressor_factory_wrapper;
 
     using msg_addr = netw::msg_addr;
     using inet_address = gms::inet_address;
@@ -266,10 +271,6 @@ public:
     uint64_t get_dropped_messages(messaging_verb verb) const;
 
     const uint64_t* get_dropped_messages() const;
-
-    int32_t get_raw_version(const gms::inet_address& endpoint) const;
-
-    bool knows_version(const gms::inet_address& endpoint) const;
 
     enum class encrypt_what {
         none,
@@ -298,6 +299,7 @@ public:
         uint16_t ssl_port = 0;
         encrypt_what encrypt = encrypt_what::none;
         compress_what compress = compress_what::none;
+        bool enable_advanced_rpc_compression = false;
         tcp_nodelay_what tcp_nodelay = tcp_nodelay_what::all;
         bool listen_on_broadcast_address = false;
         size_t rpc_memory_limit = 1'000'000;
@@ -335,6 +337,8 @@ private:
 private:
     config _cfg;
     locator::shared_token_metadata* _token_metadata = nullptr;
+    // a function that maps from ip to host id if known (returns default constructable host_id if there is no mapping)
+    std::function<locator::host_id(gms::inet_address)> _address_to_host_id_mapper;
     // map: Node broadcast address -> Node internal IP, and the reversed mapping, for communication within the same data center
     std::unordered_map<gms::inet_address, gms::inet_address> _preferred_ip_cache, _preferred_to_endpoint;
     std::unique_ptr<rpc_protocol_wrapper> _rpc;
@@ -351,6 +355,9 @@ private:
     std::vector<scheduling_info_for_connection_index> _scheduling_info_for_connection_index;
     std::vector<tenant_connection_index> _connection_index_for_tenant;
     gms::feature_service& _feature_service;
+    std::unordered_map<sstring, size_t> _dynamic_tenants_to_client_idx;
+    qos::service_level_controller& _sl_controller;
+    std::unique_ptr<compressor_factory_wrapper> _compressor_factory_wrapper;
 
     struct connection_ref;
     std::unordered_multimap<locator::host_id, connection_ref> _host_connections;
@@ -366,12 +373,14 @@ private:
 public:
     using clock_type = lowres_clock;
 
-    messaging_service(locator::host_id id, gms::inet_address ip, uint16_t port, gms::feature_service& feature_service, gms::gossip_address_map& address_map);
-    messaging_service(config cfg, scheduling_config scfg, std::shared_ptr<seastar::tls::credentials_builder>, gms::feature_service& feature_service, gms::gossip_address_map& address_map);
+    messaging_service(locator::host_id id, gms::inet_address ip, uint16_t port,
+                      gms::feature_service&, gms::gossip_address_map&, utils::walltime_compressor_tracker&, qos::service_level_controller&);
+    messaging_service(config cfg, scheduling_config scfg, std::shared_ptr<seastar::tls::credentials_builder>,
+                      gms::feature_service&, gms::gossip_address_map&, utils::walltime_compressor_tracker&, qos::service_level_controller&);
     ~messaging_service();
 
     future<> start();
-    future<> start_listen(locator::shared_token_metadata& stm);
+    future<> start_listen(locator::shared_token_metadata& stm, std::function<locator::host_id(gms::inet_address)> address_to_host_id_mapper);
     uint16_t port() const noexcept {
         return _cfg.port;
     }
@@ -448,7 +457,7 @@ private:
 
     bool is_host_banned(locator::host_id);
 
-    sstring client_metrics_domain(unsigned idx, inet_address addr) const;
+    sstring client_metrics_domain(unsigned idx, inet_address addr, std::optional<locator::host_id> id) const;
 
 public:
     // Return rpc::protocol::client for a shard which is a ip + cpuid pair.
@@ -463,10 +472,11 @@ public:
     std::unique_ptr<rpc_protocol_wrapper>& rpc();
     static msg_addr get_source(const rpc::client_info& client);
     scheduling_group scheduling_group_for_verb(messaging_verb verb) const;
-    scheduling_group scheduling_group_for_isolation_cookie(const sstring& isolation_cookie) const;
+    future<scheduling_group> scheduling_group_for_isolation_cookie(const sstring& isolation_cookie) const;
     std::vector<messaging_service::scheduling_info_for_connection_index> initial_scheduling_info() const;
-    unsigned get_rpc_client_idx(messaging_verb verb) const;
+    unsigned get_rpc_client_idx(messaging_verb verb);
     static constexpr std::array<std::string_view, 3> _connection_types_prefix = {"statement:", "statement-ack:", "forward:"}; // "forward" is the old name for "mapreduce"
+    unsigned add_statement_tenant(sstring tenant_name, scheduling_group sg);
 
     void init_feature_listeners();
 private:

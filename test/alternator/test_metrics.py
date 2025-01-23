@@ -1,6 +1,6 @@
 # Copyright 2021-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 
 ##############################################################################
 # Tests for Scylla's metrics (see docs/dev/metrics.md) for Alternator
@@ -95,13 +95,13 @@ def get_metric(metrics, name, requested_labels=None, the_metrics=None):
 # of the specified metrics. Helps reduce the amount of code duplication
 # below.
 @contextmanager
-def check_increases_metric(metrics, metric_names):
+def check_increases_metric(metrics, metric_names, requested_labels=None):
     the_metrics = get_metrics(metrics)
-    saved_metrics = { x: get_metric(metrics, x, None, the_metrics) for x in metric_names }
+    saved_metrics = { x: get_metric(metrics, x, requested_labels, the_metrics) for x in metric_names }
     yield
     the_metrics = get_metrics(metrics)
     for n in metric_names:
-        assert saved_metrics[n] < get_metric(metrics, n, None, the_metrics), f'metric {n} did not increase'
+        assert saved_metrics[n] < get_metric(metrics, n, requested_labels, the_metrics), f'metric {n} did not increase'
 
 @contextmanager
 def check_increases_metric_exact(metrics, metric_name, increase_value):

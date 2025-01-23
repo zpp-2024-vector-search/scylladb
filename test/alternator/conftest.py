@@ -1,6 +1,6 @@
 # Copyright 2019-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 
 # This file contains "test fixtures", a pytest concept described in
 # https://docs.pytest.org/en/latest/fixture.html.
@@ -68,7 +68,7 @@ def pytest_collection_modifyitems(config, items):
 # from the appropriate system table, but can't do it with Alternator (because
 # we don't know yet the secret key!), so we need to do it with CQL.
 @cache
-def get_valid_alternator_role(url):
+def get_valid_alternator_role(url, role='cassandra'):
     from cassandra.cluster import Cluster
     from cassandra.auth import PlainTextAuthProvider
     auth_provider = PlainTextAuthProvider(
@@ -85,7 +85,6 @@ def get_valid_alternator_role(url):
                 # We could have looked for any role/salted_hash pair, but we
                 # already know a role "cassandra" exists (we just used it to
                 # connect to CQL!), so let's just use that role.
-                role = 'cassandra'
                 salted_hash = list(session.execute(f"SELECT salted_hash FROM {ks}.roles WHERE role = '{role}'"))[0].salted_hash
                 if salted_hash is None:
                     break
@@ -109,7 +108,7 @@ def dynamodb(request):
     # because boto3 checks them before we can get the server to check them.
     boto_config = botocore.client.Config(parameter_validation=False)
     if request.config.getoption('aws'):
-        return boto3.resource('dynamodb', config=boto_config)
+        res = boto3.resource('dynamodb', config=boto_config)
     else:
         # Even though we connect to the local installation, Boto3 still
         # requires us to specify dummy region and credential parameters,
@@ -125,11 +124,13 @@ def dynamodb(request):
         # Disable verifying in order to be able to use self-signed TLS certificates
         verify = not request.config.getoption('https')
         user, secret = get_valid_alternator_role(local_url)
-        return boto3.resource('dynamodb', endpoint_url=local_url, verify=verify,
+        res = boto3.resource('dynamodb', endpoint_url=local_url, verify=verify,
             region_name='us-east-1', aws_access_key_id=user, aws_secret_access_key=secret,
             config=boto_config.merge(botocore.client.Config(retries={"max_attempts": 0}, read_timeout=300)))
+    yield res
+    res.meta.client.close()
 
-def new_dynamodb_session(request, dynamodb):
+def new_dynamodb_session(request, dynamodb, user='cassandra', password='secret_pass'):
     ses = boto3.Session()
     host = urlparse(dynamodb.meta.client._endpoint.host)
     conf = botocore.client.Config(parameter_validation=False)
@@ -137,7 +138,7 @@ def new_dynamodb_session(request, dynamodb):
         return boto3.resource('dynamodb', config=conf)
     if host.hostname == 'localhost':
         conf = conf.merge(botocore.client.Config(retries={"max_attempts": 0}, read_timeout=300))
-    user, secret = get_valid_alternator_role(dynamodb.meta.client._endpoint.host)
+    user, secret = get_valid_alternator_role(dynamodb.meta.client._endpoint.host, role=user)
     return ses.resource('dynamodb', endpoint_url=dynamodb.meta.client._endpoint.host, verify=host.scheme != 'http',
         region_name='us-east-1', aws_access_key_id=user, aws_secret_access_key=secret,
         config=conf)
@@ -149,7 +150,7 @@ def dynamodbstreams(request):
     # because boto3 checks them before we can get the server to check them.
     boto_config = botocore.client.Config(parameter_validation=False)
     if request.config.getoption('aws'):
-        return boto3.client('dynamodbstreams', config=boto_config)
+        res = boto3.client('dynamodbstreams', config=boto_config)
     else:
         # Even though we connect to the local installation, Boto3 still
         # requires us to specify dummy region and credential parameters,
@@ -165,9 +166,11 @@ def dynamodbstreams(request):
         # Disable verifying in order to be able to use self-signed TLS certificates
         verify = not request.config.getoption('https')
         user, secret = get_valid_alternator_role(local_url)
-        return boto3.client('dynamodbstreams', endpoint_url=local_url, verify=verify,
+        res = boto3.client('dynamodbstreams', endpoint_url=local_url, verify=verify,
             region_name='us-east-1', aws_access_key_id=user, aws_secret_access_key=secret,
             config=boto_config.merge(botocore.client.Config(retries={"max_attempts": 0}, read_timeout=300)))
+    yield res
+    res.close()
 
 # A function-scoped autouse=True fixture allows us to test after every test
 # that the server is still alive - and if not report the test which crashed
@@ -393,3 +396,38 @@ def xfail_tablets(request, has_tablets):
 def skip_tablets(has_tablets):
     if has_tablets:
         pytest.skip("Test may crash when Alternator tables use tablets")
+
+# Alternator tests normally use only the DynamoDB API. However, a few tests
+# need to use CQL to set up Scylla-only features such as service levels or
+# CQL-based RBAC (see test_service_levels.py and test_cql_rbac.py), and
+# the "cql" fixture enables using CQL.
+# If we're not testing Scylla, or the CQL port is not available on the same
+# IP address as the Alternator IP address, a test using this fixture will
+# be skipped with a message about the CQL API not being available.
+@pytest.fixture(scope="session")
+def cql(dynamodb):
+    from cassandra.auth import PlainTextAuthProvider
+    from cassandra.cluster import Cluster, ConsistencyLevel, ExecutionProfile, EXEC_PROFILE_DEFAULT, NoHostAvailable
+    from cassandra.policies import RoundRobinPolicy
+    if is_aws(dynamodb):
+        pytest.skip('Scylla-only CQL API not supported by AWS')
+    url = dynamodb.meta.client._endpoint.host
+    host, = re.search(r'.*://([^:]*):', url).groups()
+    profile = ExecutionProfile(
+        load_balancing_policy=RoundRobinPolicy(),
+        consistency_level=ConsistencyLevel.LOCAL_QUORUM,
+        serial_consistency_level=ConsistencyLevel.LOCAL_SERIAL)
+    cluster = Cluster(execution_profiles={EXEC_PROFILE_DEFAULT: profile},
+        contact_points=[host],
+        port=9042,
+        protocol_version=4,
+        auth_provider=PlainTextAuthProvider(username='cassandra', password='cassandra'),
+    )
+    try:
+        ret = cluster.connect()
+        # "BEGIN BATCH APPLY BATCH" is the closest to do-nothing I could find
+        ret.execute("BEGIN BATCH APPLY BATCH")
+    except NoHostAvailable:
+        pytest.skip('Could not connect to Scylla-only CQL API')
+    yield ret
+    cluster.shutdown()

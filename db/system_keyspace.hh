@@ -4,7 +4,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #pragma once
@@ -28,6 +28,10 @@
 #include "virtual_tables.hh"
 #include "types/types.hh"
 #include "auth_version.hh"
+
+namespace utils {
+    class shared_dict;
+};
 
 namespace sstables {
     struct entry_descriptor;
@@ -184,6 +188,7 @@ public:
     static constexpr auto TABLETS = "tablets";
     static constexpr auto SERVICE_LEVELS_V2 = "service_levels_v2";
     static constexpr auto VIEW_BUILD_STATUS_V2 = "view_build_status_v2";
+    static constexpr auto DICTS = "dicts";
 
     // auth
     static constexpr auto ROLES = "roles";
@@ -278,6 +283,7 @@ public:
     static schema_ptr tablets();
     static schema_ptr service_levels_v2();
     static schema_ptr view_build_status_v2();
+    static schema_ptr dicts();
 
     // auth
     static schema_ptr roles();
@@ -643,13 +649,20 @@ public:
     future<service::topology_request_state> get_topology_request_state(utils::UUID id, bool require_entry);
     topology_requests_entry topology_request_row_to_entry(utils::UUID id, const cql3::untyped_result_set_row& row);
     future<topology_requests_entry> get_topology_request_entry(utils::UUID id, bool require_entry);
-    future<topology_requests_entries> get_topology_request_entries(db_clock::time_point end_time_limit);
+    future<topology_requests_entries> get_node_ops_request_entries(db_clock::time_point end_time_limit);
 
 public:
     future<std::optional<int8_t>> get_service_levels_version();
     
     future<mutation> make_service_levels_version_mutation(int8_t version, const service::group0_guard& guard);
     future<std::optional<mutation>> get_service_levels_version_mutation();
+
+    // Publishes a new compression dictionary to `dicts`,
+    // with the current timestamp.
+    future<mutation> get_insert_dict_mutation(
+            bytes dict, locator::host_id self, db_clock::time_point dict_ts, api::timestamp_type write_ts) const;
+    // Queries `dicts` for the most recent compression dictionary.
+    future<utils::shared_dict> query_dict() const;
 
 private:
     static std::optional<service::topology_features> decode_topology_features_state(::shared_ptr<cql3::untyped_result_set> rs);

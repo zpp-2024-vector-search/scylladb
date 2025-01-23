@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -15,6 +15,8 @@
 #include "query-request.hh"
 #include "mutation/mutation_fragment.hh"
 #include "mutation/mutation_fragment_v2.hh"
+
+#include <boost/range/iterator_range.hpp>
 
 // Utility for in-order checking of overlap with position ranges.
 class clustering_ranges_walker {

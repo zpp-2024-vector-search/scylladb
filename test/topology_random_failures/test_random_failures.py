@@ -1,7 +1,7 @@
 #
 # Copyright (C) 2024-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from test.topology.util import wait_for_token_ring_and_group0_consistency, get_c
 from test.topology.conftest import skip_mode
 from test.pylib.internal_types import ServerUpState
 from test.topology_random_failures.cluster_events import CLUSTER_EVENTS, TOPOLOGY_TIMEOUT
-from test.topology_random_failures.error_injections import ERROR_INJECTIONS
+from test.topology_random_failures.error_injections import ERROR_INJECTIONS, ERROR_INJECTIONS_NODE_MAY_HANG
 
 if TYPE_CHECKING:
     from test.pylib.random_tables import RandomTables
@@ -35,9 +35,9 @@ TESTS_COUNT = 1  # number of tests from the whole matrix to run, None to run the
 
 # Following parameters can be adjusted to run same sequence of tests from a previous run.  Look at logs for the values.
 # Also see `pytest_generate_tests()` below for details.
-TESTS_SHUFFLE_SEED = None  # seed for the tests order randomization
-ERROR_INJECTIONS_COUNT = None  # limit number of error injections
-CLUSTER_EVENTS_COUNT = None  # limit number of cluster events
+TESTS_SHUFFLE_SEED = random.randrange(sys.maxsize)  # seed for the tests order randomization
+ERROR_INJECTIONS_COUNT = len(ERROR_INJECTIONS)  # change it to limit number of error injections
+CLUSTER_EVENTS_COUNT = len(CLUSTER_EVENTS)  # change it to limit number of cluster events
 
 WAIT_FOR_IP_TIMEOUT = 30  # seconds
 
@@ -49,8 +49,7 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     cluster_events = CLUSTER_EVENTS[:CLUSTER_EVENTS_COUNT]
     tests = list(itertools.product(error_injections, cluster_events))
 
-    seed = random.randrange(sys.maxsize) if TESTS_SHUFFLE_SEED is None else TESTS_SHUFFLE_SEED
-    random.Random(seed).shuffle(tests)
+    random.Random(TESTS_SHUFFLE_SEED).shuffle(tests)
 
     # Deselect unsupported combinations.  Do it after the shuffle to have the stable order.
     tests = [
@@ -58,12 +57,6 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     ]
 
     metafunc.parametrize(["error_injection", "cluster_event"], tests[:TESTS_COUNT])
-
-    LOGGER.info(
-        "To repeat this run set TESTS_COUNT to %s, TESTS_SHUFFLE_SEED to %s, ERROR_INJECTIONS_COUNT to %s,"
-        " and CLUSTER_EVENTS_COUNT to %s",
-        TESTS_COUNT, seed, len(error_injections), len(cluster_events),
-    )
 
 
 @pytest.fixture
@@ -90,6 +83,12 @@ async def test_random_failures(manager: ManagerClient,
                                random_tables: RandomTables,
                                error_injection: str,
                                cluster_event: ClusterEventType) -> None:
+    LOGGER.info(
+        "To repeat this run set TESTS_COUNT to %s, TESTS_SHUFFLE_SEED to %s, ERROR_INJECTIONS_COUNT to %s,"
+        " and CLUSTER_EVENTS_COUNT to %s",
+        TESTS_COUNT, TESTS_SHUFFLE_SEED, ERROR_INJECTIONS_COUNT, CLUSTER_EVENTS_COUNT,
+    )
+
     table = await random_tables.add_table(ncolumns=5)
     await table.insert_seq()
 
@@ -150,14 +149,19 @@ async def test_random_failures(manager: ManagerClient,
 
     server_log = await manager.server_open_log(server_id=s_info.server_id)
 
-    if cluster_event_duration + 1 >= WAIT_FOR_IP_TIMEOUT and error_injection in (  # give one more second for a tolerance
-        "stop_after_sending_join_node_request",
-        "stop_after_bootstrapping_initial_raft_configuration",
-    ):
+    if cluster_event_duration + 1 >= WAIT_FOR_IP_TIMEOUT and error_injection in ERROR_INJECTIONS_NODE_MAY_HANG:
         LOGGER.info("Expecting the added node can hang and we'll have a message in the coordinator's log.  See #18638.")
         coordinator = await get_coordinator_host(manager=manager)
         coordinator_log = await manager.server_open_log(server_id=coordinator.server_id)
-        if matches := await coordinator_log.grep(r"The node may hang\. It's safe to shut it down manually now\."):
+        coordinator_log_pattern = r"The node may hang\. It's safe to shut it down manually now\."
+        if matches := await server_log.grep(r"init - Setting local host id to (?P<hostid>[0-9a-f-]+)"):
+            line, match = matches[-1]
+            LOGGER.info("Found following message in the coordinator's log:\n\t%s", line)
+            coordinator_log_pattern += (
+                rf"|updating topology state: rollback {match.group('hostid')} after bootstrapping failure, moving"
+                rf" transition state to left token ring and setting cleanup flag"
+            )
+        if matches := await coordinator_log.grep(coordinator_log_pattern):
             LOGGER.info("Found following message in the coordinator's log:\n\t%s", matches[-1][0])
             await manager.server_stop(server_id=s_info.server_id)
 

@@ -3,20 +3,16 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 
 #include <exception>
-#include <typeinfo>
 #include <type_traits>
 #include <memory>
-#include <ostream>
 #include <variant>
 #include <seastar/core/future.hh>
-#include <seastar/core/distributed.hh>
-#include <seastar/util/log.hh>
 #include "utils/variant_element.hh"
 
 namespace utils {

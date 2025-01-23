@@ -3,13 +3,12 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 
 #include <memory>
-#include <ranges>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/sstring.hh>
 

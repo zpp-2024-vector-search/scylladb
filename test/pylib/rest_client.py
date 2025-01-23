@@ -1,7 +1,7 @@
 #
 # Copyright (C) 2022-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 """Asynchronous helper for Scylla REST API operations.
 """
@@ -273,8 +273,8 @@ class ScyllaRESTAPIClient():
             "token": str(token)
         })
 
-    async def tablet_repair(self, node_ip: str, ks: str, table: str, token : int) -> None:
-        await self.client.post(f"/storage_service/tablets/repair", host=node_ip, params={
+    async def tablet_repair(self, node_ip: str, ks: str, table: str, token : int, timeout: Optional[float] = None) -> None:
+        await self.client.post(f"/storage_service/tablets/repair", host=node_ip, timeout=timeout, params={
             "ks": ks,
             "table": table,
             "tokens": str(token)
@@ -328,13 +328,15 @@ class ScyllaRESTAPIClient():
                   "snapshot": tag}
         return await self.client.post_json(f"/storage_service/backup", host=node_ip, params=params)
 
-    async def restore(self, node_ip: str, ks: str, cf: str, dest: str, bucket: str, prefix: str, sstables: list[str]) -> str:
+    async def restore(self, node_ip: str, ks: str, cf: str, dest: str, bucket: str, prefix: str, sstables: list[str], scope: str = None) -> str:
         """Restore keyspace:table from backup"""
         params = {"keyspace": ks,
                   "table": cf,
                   "endpoint": dest,
                   "bucket": bucket,
                   "prefix": prefix}
+        if scope is not None:
+            params['scope'] = scope
         return await self.client.post_json(f"/storage_service/restore", host=node_ip, params=params, json=sstables)
 
     async def take_snapshot(self, node_ip: str, ks: str, tag: str) -> None:

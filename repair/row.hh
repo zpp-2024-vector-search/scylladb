@@ -3,14 +3,13 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 #include <optional>
 #include "mutation/frozen_mutation.hh"
 #include <seastar/core/shared_ptr.hh>
-#include <seastar/core/coroutine.hh>
 #include "repair/decorated_key_with_hash.hh"
 #include "repair/hash.hh"
 #include "repair/sync_boundary.hh"

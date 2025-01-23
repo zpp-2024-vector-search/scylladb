@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #include <chrono>
@@ -16,7 +16,6 @@
 #include <vector>
 #include <algorithm>
 
-#include <boost/algorithm/string/join.hpp>
 #include <boost/range/numeric.hpp>
 
 #include <fmt/ranges.h>
@@ -1674,13 +1673,14 @@ future<query::clustering_row_ranges> calculate_affected_clustering_ranges(data_d
     // content, in case the view includes a column that is not included in
     // this mutation.
 
-    //FIXME: Unfortunate copy.
-    co_return interval<clustering_key_prefix_view>::deoverlap(std::move(row_ranges), cmp)
-            | std::views::transform([] (auto&& v) {
-                return std::move(v).transform([] (auto&& ckv) { return clustering_key_prefix(ckv); });
-            })
-            | std::ranges::to<query::clustering_row_ranges>();
-
+    query::clustering_row_ranges result_ranges;
+    auto deoverlapped_ranges = interval<clustering_key_prefix_view>::deoverlap(std::move(row_ranges), cmp);
+    result_ranges.reserve(deoverlapped_ranges.size());
+    for (auto&& r : deoverlapped_ranges) {
+        result_ranges.emplace_back(std::move(r).transform([] (auto&& ckv) { return clustering_key_prefix(ckv); }));
+        co_await coroutine::maybe_yield();
+    }
+    co_return result_ranges;
 }
 
 bool needs_static_row(const mutation_partition& mp, const std::vector<view_and_base>& views) {
@@ -2050,10 +2050,9 @@ future<> view_builder::start_in_background(service::migration_manager& mm, utils
         // the view build information.
         fail.cancel();
         co_await barrier.arrive_and_wait();
-        units.return_all();
 
-        co_await calculate_shard_build_step(vbi);
         _mnotifier.register_listener(this);
+        co_await calculate_shard_build_step(vbi);
         _current_step = _base_to_build_step.begin();
         // Waited on indirectly in stop().
         (void)_build_step.trigger();
@@ -2356,7 +2355,7 @@ static future<> announce_with_raft(
 
 future<> view_builder::mark_view_build_started(sstring ks_name, sstring view_name) {
     co_await write_view_build_status(
-        [&] () -> future<> {
+        [this, ks_name, view_name] () -> future<> {
             co_await utils::get_local_injector().inject("view_builder_pause_add_new_view", utils::wait_for_message(5min));
             const sstring query_string = format("INSERT INTO {}.{} (keyspace_name, view_name, host_id, status) VALUES (?, ?, ?, ?)",
                     db::system_keyspace::NAME, db::system_keyspace::VIEW_BUILD_STATUS_V2);
@@ -2365,7 +2364,7 @@ future<> view_builder::mark_view_build_started(sstring ks_name, sstring view_nam
                     {std::move(ks_name), std::move(view_name), host_id.uuid(), "STARTED"},
                     "view builder: mark view build STARTED");
         },
-        [&] () -> future<> {
+        [this, ks_name, view_name] () -> future<> {
             co_await utils::get_local_injector().inject("view_builder_pause_add_new_view", utils::wait_for_message(5min));
             co_await _sys_dist_ks.start_view_build(std::move(ks_name), std::move(view_name));
         }
@@ -2374,7 +2373,7 @@ future<> view_builder::mark_view_build_started(sstring ks_name, sstring view_nam
 
 future<> view_builder::mark_view_build_success(sstring ks_name, sstring view_name) {
     co_await write_view_build_status(
-        [&] () -> future<> {
+        [this, ks_name, view_name] () -> future<> {
             co_await utils::get_local_injector().inject("view_builder_pause_mark_success", utils::wait_for_message(5min));
             const sstring query_string = format("UPDATE {}.{} SET status = ? WHERE keyspace_name = ? AND view_name = ? AND host_id = ?",
                     db::system_keyspace::NAME, db::system_keyspace::VIEW_BUILD_STATUS_V2);
@@ -2383,7 +2382,7 @@ future<> view_builder::mark_view_build_success(sstring ks_name, sstring view_nam
                     {"SUCCESS", std::move(ks_name), std::move(view_name), host_id.uuid()},
                     "view builder: mark view build SUCCESS");
         },
-        [&] () -> future<> {
+        [this, ks_name, view_name] () -> future<> {
             co_await utils::get_local_injector().inject("view_builder_pause_mark_success", utils::wait_for_message(5min));
             co_await _sys_dist_ks.finish_view_build(std::move(ks_name), std::move(view_name));
         }
@@ -2392,14 +2391,14 @@ future<> view_builder::mark_view_build_success(sstring ks_name, sstring view_nam
 
 future<> view_builder::remove_view_build_status(sstring ks_name, sstring view_name) {
     co_await write_view_build_status(
-        [&] () -> future<> {
+        [this, ks_name, view_name] () -> future<> {
             const sstring query_string = format("DELETE FROM {}.{} WHERE keyspace_name = ? AND view_name = ?",
                     db::system_keyspace::NAME, db::system_keyspace::VIEW_BUILD_STATUS_V2);
             co_await announce_with_raft(_qp, _group0_client, _as, std::move(query_string),
                     {std::move(ks_name), std::move(view_name)},
                     "view builder: delete view build status");
         },
-        [&] () -> future<> {
+        [this, ks_name, view_name] () -> future<> {
             co_await _sys_dist_ks.remove_view(std::move(ks_name), std::move(view_name));
         }
     );
@@ -2434,25 +2433,25 @@ future<std::unordered_map<locator::host_id, sstring>> view_builder::view_status(
 }
 
 future<std::unordered_map<sstring, sstring>>
-view_builder::view_build_statuses(sstring keyspace, sstring view_name) const {
+view_builder::view_build_statuses(sstring keyspace, sstring view_name, const gms::gossiper& gossiper) const {
     std::unordered_map<locator::host_id, sstring> status = co_await view_status(std::move(keyspace), std::move(view_name));
     std::unordered_map<sstring, sstring> status_map;
     const auto& topo = _db.get_token_metadata().get_topology();
     topo.for_each_node([&] (const locator::node& node) {
         auto it = status.find(node.host_id());
         auto s = it != status.end() ? std::move(it->second) : "UNKNOWN";
-        status_map.emplace(fmt::to_string(node.endpoint()), std::move(s));
+        status_map.emplace(fmt::to_string(gossiper.get_address_map().get(node.host_id())), std::move(s));
     });
     co_return status_map;
 }
 
 future<> view_builder::add_new_view(view_ptr view, build_step& step) {
     vlogger.info0("Building view {}.{}, starting at token {}", view->ks_name(), view->cf_name(), step.current_token());
+    if (this_shard_id() == 0) {
+        co_await mark_view_build_started(view->ks_name(), view->cf_name());
+    }
+    co_await _sys_ks.register_view_for_building(view->ks_name(), view->cf_name(), step.current_token());
     step.build_status.emplace(step.build_status.begin(), view_build_status{view, step.current_token(), std::nullopt});
-    auto f = this_shard_id() == 0 ? mark_view_build_started(view->ks_name(), view->cf_name()) : make_ready_future<>();
-    return when_all_succeed(
-            std::move(f),
-            _sys_ks.register_view_for_building(view->ks_name(), view->cf_name(), step.current_token())).discard_result();
 }
 
 static future<> flush_base(lw_shared_ptr<replica::column_family> base, abort_source& as) {
@@ -2655,7 +2654,7 @@ future<> view_builder::migrate_to_v2(locator::token_metadata_ptr tmptr, db::syst
     co_await utils::get_local_injector().inject("view_builder_pause_in_migrate_v2", utils::wait_for_message(5min));
 
     auto col_names = schema->all_columns() | std::views::transform([] (const auto& col) {return col.name_as_cql_string(); }) | std::ranges::to<std::vector<sstring>>();
-    auto col_names_str = boost::algorithm::join(col_names, ", ");
+    auto col_names_str = fmt::to_string(fmt::join(col_names, ", "));
     sstring val_binders_str = "?";
     for (size_t i = 1; i < col_names.size(); ++i) {
         val_binders_str += ", ?";
@@ -2671,7 +2670,7 @@ future<> view_builder::migrate_to_v2(locator::token_metadata_ptr tmptr, db::syst
         // In the v1 table we may have left over rows that belong to nodes that were removed
         // and we didn't clean them, so do that now.
         auto host_id = row.get_as<utils::UUID>("host_id");
-        if (!tmptr->get_endpoint_for_host_id_if_known(locator::host_id(host_id))) {
+        if (!tmptr->get_topology().find_node(locator::host_id(host_id))) {
             vlogger.warn("Dropping a row from view_build_status: host {} does not exist", host_id);
             continue;
         }
@@ -2697,7 +2696,7 @@ future<> view_builder::migrate_to_v2(locator::token_metadata_ptr tmptr, db::syst
         auto row_ts = row.get_as<api::timestamp_type>("ts");
 
         auto muts = co_await qp.get_mutations_internal(
-            format("INSERT INTO {}.{} ({}) VALUES ({})",
+            seastar::format("INSERT INTO {}.{} ({}) VALUES ({})",
                 db::system_keyspace::NAME,
                 db::system_keyspace::VIEW_BUILD_STATUS_V2,
                 col_names_str,
@@ -3151,7 +3150,7 @@ future<bool> view_builder::check_view_build_ongoing(const locator::token_metadat
     return view_status(ks_name, cf_name).then([&tm] (view_statuses_type&& view_statuses) {
         return std::ranges::any_of(view_statuses, [&tm] (const view_statuses_type::value_type& view_status) {
             // Only consider status of known hosts.
-            return view_status.second == "STARTED" && tm.get_endpoint_for_host_id_if_known(view_status.first);
+            return view_status.second == "STARTED" && tm.get_topology().find_node(view_status.first);
         });
     });
 }

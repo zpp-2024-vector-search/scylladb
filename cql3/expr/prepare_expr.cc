@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "expression.hh"
@@ -1191,18 +1191,24 @@ try_prepare_expression(const expression& expr, data_dictionary::database db, con
 
             auto col_spec = column_specification_of(sub_col);
             lw_shared_ptr<column_specification> subscript_column_spec;
+            data_type value_cmp;
             if (sub_col_type.is_map()) {
                 subscript_column_spec = map_key_spec_of(*col_spec);
+                value_cmp = static_cast<const collection_type_impl&>(sub_col_type).value_comparator();
+            } else if (sub_col_type.is_set()) {
+                subscript_column_spec = set_value_spec_of(*col_spec);
+                value_cmp = static_cast<const collection_type_impl&>(sub_col_type).name_comparator();
             } else if (sub_col_type.is_list()) {
                 subscript_column_spec = list_key_spec_of(*col_spec);
+                value_cmp = static_cast<const collection_type_impl&>(sub_col_type).value_comparator();
             } else {
-                throw exceptions::invalid_request_exception(format("Column {} is not a map/list, cannot be subscripted", col_spec->name->text()));
+                throw exceptions::invalid_request_exception(format("Column {} is not a map/set/list, cannot be subscripted", col_spec->name->text()));
             }
 
             return subscript {
                 .val = sub_col,
                 .sub = prepare_expression(sub.sub, db, schema.ks_name(), &schema, std::move(subscript_column_spec)),
-                .type = static_cast<const collection_type_impl&>(sub_col_type).value_comparator(),
+                .type = value_cmp,
             };
         },
         [&] (const unresolved_identifier& unin) -> std::optional<expression> {
@@ -1280,7 +1286,8 @@ test_assignment(const expression& expr, data_dictionary::database db, const sstr
             return expression_test_assignment(col_val.col->type, receiver);
         },
         [&] (const subscript&) -> test_result {
-            on_internal_error(expr_logger, "subscripts are not yet reachable via test_assignment()");
+            // not implemented. issue #22075
+            return assignment_testable::test_result::NOT_ASSIGNABLE;
         },
         [&] (const unresolved_identifier& ui) -> test_result {
             return unresolved_identifier_test_assignment(ui, db, keyspace, schema_opt, receiver);
@@ -1388,6 +1395,8 @@ static lw_shared_ptr<column_specification> get_lhs_receiver(const expression& pr
             const column_value& sub_col = get_subscripted_column(col_val);
             if (sub_col.col->type->is_map()) {
                 return map_value_spec_of(*sub_col.col->column_specification);
+            } else if (sub_col.col->type->is_set()) {
+                return set_value_spec_of(*sub_col.col->column_specification);
             } else {
                 return list_value_spec_of(*sub_col.col->column_specification);
             }
@@ -1450,9 +1459,9 @@ static lw_shared_ptr<column_specification> get_lhs_receiver(const expression& pr
 static lw_shared_ptr<column_specification> get_rhs_receiver(lw_shared_ptr<column_specification>& lhs_receiver, oper_t oper) {
     const data_type lhs_type = lhs_receiver->type->underlying_type();
 
-    if (oper == oper_t::IN) {
+    if (oper == oper_t::IN || oper == oper_t::NOT_IN) {
         data_type rhs_receiver_type = list_type_impl::get_instance(std::move(lhs_type), false);
-        auto in_name = ::make_shared<column_identifier>(format("in({})", lhs_receiver->name->text()), true);
+        auto in_name = ::make_shared<column_identifier>(format("{}({})", oper, lhs_receiver->name->text()), true);
         return make_lw_shared<column_specification>(lhs_receiver->ks_name,
                                                     lhs_receiver->cf_name,
                                                     in_name,

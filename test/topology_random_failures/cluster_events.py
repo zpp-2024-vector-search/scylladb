@@ -1,7 +1,7 @@
 #
 # Copyright (C) 2024-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 
 from __future__ import annotations
@@ -67,6 +67,14 @@ def deselect_for(reason: str, error_injections: list[str] | None = None) -> Call
 #       >>> await anext(cluster_event, None)
 
 
+@deselect_for(
+    # TODO: remove this skip when #21534 will be resolved.
+    error_injections=[
+        "stop_after_setting_mode_to_normal_raft_topology",
+        "stop_before_becoming_raft_voter",
+    ],
+    reason="See issue #21534 (assertion 'local_is_initialized()' failed during shutdown after a failed boot)",
+)
 async def sleep_for_30_seconds(manager: ManagerClient,
                                random_tables: RandomTables,
                                error_injection: str) -> AsyncIterator[None]:
@@ -525,6 +533,14 @@ async def remove_node(manager: ManagerClient,
     yield
 
 
+@deselect_for(
+    # TODO: remove this skip when #21534 will be resolved.
+    error_injections=[
+        "stop_after_setting_mode_to_normal_raft_topology",
+        "stop_before_becoming_raft_voter",
+    ],
+    reason="See issue #21534 (assertion 'local_is_initialized()' failed during shutdown after a failed boot)",
+)
 async def restart_non_coordinator_node(manager: ManagerClient,
                                        random_tables: RandomTables,
                                        error_injection: str) -> AsyncIterator[None]:
@@ -536,6 +552,14 @@ async def restart_non_coordinator_node(manager: ManagerClient,
     yield
 
 
+@deselect_for(
+    # TODO: remove this skip when #21534 will be resolved.
+    error_injections=[
+        "stop_after_setting_mode_to_normal_raft_topology",
+        "stop_before_becoming_raft_voter",
+    ],
+    reason="See issue #21534 (assertion 'local_is_initialized()' failed during shutdown after a failed boot)",
+)
 async def restart_coordinator_node(manager: ManagerClient,
                                    random_tables: RandomTables,
                                    error_injection: str) -> AsyncIterator[None]:
@@ -546,7 +570,14 @@ async def restart_coordinator_node(manager: ManagerClient,
 
     yield
 
-
+@deselect_for(
+    # TODO: remove this skip when #21534 will be resolved.
+    error_injections=[
+        "stop_after_setting_mode_to_normal_raft_topology",
+        "stop_before_becoming_raft_voter",
+    ],
+    reason="See issue #21534 (assertion 'local_is_initialized()' failed during shutdown after a failed boot)",
+)
 async def stop_non_coordinator_node_gracefully(manager: ManagerClient,
                                                random_tables: RandomTables,
                                                error_injection: str) -> AsyncIterator[None]:
@@ -562,6 +593,7 @@ async def stop_non_coordinator_node_gracefully(manager: ManagerClient,
     # TODO: remove this skip when #21534 will be resolved.
     error_injections=[
         "stop_after_setting_mode_to_normal_raft_topology",
+        "stop_before_becoming_raft_voter",
     ],
     reason="See issue #21534 (assertion 'local_is_initialized()' failed during shutdown after a failed boot)",
 )
@@ -576,6 +608,14 @@ async def stop_coordinator_node_gracefully(manager: ManagerClient,
     yield
 
 
+@deselect_for(
+    # TODO: remove this skip when #21534 will be resolved.
+    error_injections=[
+        "stop_after_setting_mode_to_normal_raft_topology",
+        "stop_before_becoming_raft_voter",
+    ],
+    reason="See issue #21534 (assertion 'local_is_initialized()' failed during shutdown after a failed boot)",
+)
 async def kill_non_coordinator_node(manager: ManagerClient,
                                     random_tables: RandomTables,
                                     error_injection: str) -> AsyncIterator[None]:
@@ -594,6 +634,7 @@ async def kill_non_coordinator_node(manager: ManagerClient,
     # TODO: remove this skip when #21534 will be resolved.
     error_injections=[
         "stop_after_setting_mode_to_normal_raft_topology",
+        "stop_before_becoming_raft_voter",
     ],
     reason="See issue #21534 (assertion 'local_is_initialized()' failed during shutdown after a failed boot)",
 )

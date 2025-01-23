@@ -2,13 +2,13 @@
  * Copyright 2016-present ScyllaDB
  **/
 
-/* SPDX-License-Identifier: AGPL-3.0-or-later
+/* SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 
-#include <boost/signals2.hpp>
 #include <boost/signals2/dummy_mutex.hpp>
+#include <boost/signals2/signal_type.hpp>
 #include <type_traits>
 #include <concepts>
 

@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #include <algorithm>
@@ -121,6 +121,7 @@ void migration_manager::init_messaging_service()
                 _feature_listeners.push_back(feature.when_enabled(reload_schema_in_bg));
             }
         }
+        _feature_listeners.push_back(_feat.in_memory_tables.when_enabled(reload_schema_in_bg));
     }
 
     ser::migration_manager_rpc_verbs::register_definitions_update(&_messaging, [this] (const rpc::client_info& cinfo, std::vector<frozen_mutation>, rpc::optional<std::vector<canonical_mutation>> cm) {
@@ -626,6 +627,13 @@ std::vector<mutation> prepare_new_keyspace_announcement(replica::database& db, l
     return db::schema_tables::make_create_keyspace_mutations(db.features().cluster_schema_features(), ksm, timestamp);
 }
 
+static
+future<> validate(schema_ptr schema) {
+    return do_for_each(schema->extensions(), [schema](auto & p) {
+        return p.second->validate(*schema);
+    });
+}
+
 static future<std::vector<mutation>> include_keyspace(
         storage_proxy& sp, const keyspace_metadata& keyspace, std::vector<mutation> mutations) {
     // Include the serialized keyspace in case the target node missed a CREATE KEYSPACE migration (see CASSANDRA-5631).
@@ -656,6 +664,7 @@ static future<std::vector<mutation>> do_prepare_new_column_family_announcement(s
 }
 
 future<std::vector<mutation>> prepare_new_column_family_announcement(storage_proxy& sp, schema_ptr cfm, api::timestamp_type timestamp) {
+  return validate(cfm).then([&sp, cfm, timestamp] {
     try {
         auto& db = sp.get_db().local();
         auto ksm = db.find_keyspace(cfm->ks_name()).metadata();
@@ -663,6 +672,7 @@ future<std::vector<mutation>> prepare_new_column_family_announcement(storage_pro
     } catch (const replica::no_such_keyspace& e) {
         throw exceptions::configuration_exception(format("Cannot add table '{}' to non existing keyspace '{}'.", cfm->cf_name(), cfm->ks_name()));
     }
+  });
 }
 
 future<> prepare_new_column_family_announcement(std::vector<mutation>& mutations,
@@ -677,6 +687,7 @@ future<> prepare_new_column_family_announcement(std::vector<mutation>& mutations
 future<std::vector<mutation>> prepare_column_family_update_announcement(storage_proxy& sp,
         schema_ptr cfm, std::vector<view_ptr> view_updates, api::timestamp_type ts) {
     warn(unimplemented::cause::VALIDATION);
+    co_await validate(cfm);
     try {
         auto& db = sp.local_db();
         auto&& old_schema = db.find_column_family(cfm->ks_name(), cfm->cf_name()).schema(); // FIXME: Should we lookup by id?
@@ -826,6 +837,7 @@ future<std::vector<mutation>> prepare_type_drop_announcement(storage_proxy& sp, 
 }
 
 future<std::vector<mutation>> prepare_new_view_announcement(storage_proxy& sp, view_ptr view, api::timestamp_type ts) {
+  return validate(view).then([&sp, view = std::move(view), ts] {
     auto& db = sp.local_db();
     try {
         auto keyspace = db.find_keyspace(view->ks_name()).metadata();
@@ -846,9 +858,11 @@ future<std::vector<mutation>> prepare_new_view_announcement(storage_proxy& sp, v
         return make_exception_future<std::vector<mutation>>(
             exceptions::configuration_exception(format("Cannot add view '{}' to non existing keyspace '{}'.", view->cf_name(), view->ks_name())));
     }
+  });
 }
 
 future<std::vector<mutation>> prepare_view_update_announcement(storage_proxy& sp, view_ptr view, api::timestamp_type ts) {
+    co_await validate(view);
     auto db = sp.data_dictionary();
     try {
         auto&& keyspace = db.find_keyspace(view->ks_name()).metadata();
@@ -919,15 +933,11 @@ future<> migration_manager::announce_without_raft(std::vector<mutation> schema, 
     try {
         using namespace std::placeholders;
         auto all_live = _gossiper.get_live_members();
-        auto live_members = all_live | std::views::filter([this, my_address = _messaging.broadcast_address()] (const gms::inet_address& endpoint) {
+        auto live_members = all_live | std::views::filter([my_address = _gossiper.my_host_id()] (const locator::host_id& endpoint) {
             // only push schema to nodes with known and equal versions
-            return endpoint != my_address &&
-                _messaging.knows_version(endpoint) &&
-                _messaging.get_raw_version(endpoint) == netw::messaging_service::current_version;
+            return endpoint != my_address;
         });
-        // FIXME: gossiper should return host id set
-        auto live_host_ids = live_members | std::views::transform([&] (const gms::inet_address& ip) { return _gossiper.get_host_id(ip); });
-        co_await coroutine::parallel_for_each(live_host_ids,
+        co_await coroutine::parallel_for_each(live_members,
             std::bind(std::mem_fn(&migration_manager::push_schema_mutation), this, std::placeholders::_1, schema));
     } catch (...) {
         mlogger.error("failed to announce migration to all nodes: {}", std::current_exception());
@@ -1058,29 +1068,20 @@ static future<schema_ptr> get_schema_definition(table_schema_version v, locator:
             // with TTL (refresh TTL in case column mapping already existed prior to that).
             auto us = s.unfreeze(db::schema_ctxt(proxy));
             // if this is a view - sanity check that its schema doesn't need fixing.
+            schema_ptr base_schema;
             if (us->is_view()) {
                 auto& db = proxy.local().local_db();
-                schema_ptr base_schema = db.find_schema(us->view_info()->base_id());
+                base_schema = db.find_schema(us->view_info()->base_id());
                 db::schema_tables::check_no_legacy_secondary_index_mv_schema(db, view_ptr(us), base_schema);
             }
-            return db::schema_tables::store_column_mapping(proxy, us, true).then([us] {
-                return frozen_schema{us};
+            return db::schema_tables::store_column_mapping(proxy, us, true).then([us, base_schema] -> base_and_view_schemas {
+                if (us->is_view()) {
+                    return {frozen_schema(us), base_schema};
+                } else {
+                    return {frozen_schema(us)};
+                }
             });
         });
-    }).then([&storage_proxy] (schema_ptr s) {
-        // If this is a view so this schema also needs a reference to the base
-        // table.
-        if (s->is_view()) {
-            if (!s->view_info()->base_info()) {
-                auto& db = storage_proxy.local_db();
-                // This line might throw a no_such_column_family
-                // It should be fine since if we tried to register a view for which
-                // we don't know the base table, our registry is broken.
-                schema_ptr base_schema = db.find_schema(s->view_info()->base_id());
-                s->view_info()->set_base_info(s->view_info()->make_base_dependent_view_info(*base_schema));
-            }
-        }
-        return s;
     });
 }
 
@@ -1104,6 +1105,8 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
     }
 
     if (!s) {
+        // The schema returned by get_schema_definition comes (eventually) from the schema registry,
+        // so if it is a view, it already has base info and we don't need to set it later
         s = co_await get_schema_definition(v, dst, shard, ms, _storage_proxy);
     }
 
@@ -1116,23 +1119,6 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
             co_await maybe_sync(s, dst);
         }
     }
-    // here s is guaranteed to be valid and synced
-    if (s->is_view() && !s->view_info()->base_info()) {
-        // The way to get here is if the view schema was deactivated
-        // and reactivated again, or if we loaded it from the schema
-        // history.
-        auto& db = _storage_proxy.local_db();
-        // This line might throw a no_such_column_family but
-        // that is fine, if the schema is synced, it means that if
-        // we failed to get the base table, we learned about the base
-        // table not existing (which means that the view also doesn't exist
-        // any more), which means that this schema is actually useless for either
-        // read or write so we better throw than return an incomplete useless
-        // schema
-        schema_ptr base_schema = db.find_schema(s->view_info()->base_id());
-        s->view_info()->set_base_info(s->view_info()->make_base_dependent_view_info(*base_schema));
-    }
-
     co_return s;
 }
 

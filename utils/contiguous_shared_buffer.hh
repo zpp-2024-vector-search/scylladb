@@ -3,13 +3,13 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 
 #include <concepts>
-#include <memory>
+#include <cstddef>
 
 // A contiguous buffer of char objects which can be trimmed and
 // supports zero-copy sharing of its underlying memory.

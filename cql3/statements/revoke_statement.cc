@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #include "revoke_statement.hh"
@@ -15,7 +15,7 @@
 
 std::unique_ptr<cql3::statements::prepared_statement> cql3::statements::revoke_statement::prepare(
                 data_dictionary::database db, cql_stats& stats) {
-    return std::make_unique<prepared_statement>(::make_shared<revoke_statement>(*this));
+    return std::make_unique<prepared_statement>(audit_info(), ::make_shared<revoke_statement>(*this));
 }
 
 future<::shared_ptr<cql_transport::messages::result_message>>

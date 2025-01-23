@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "utils/assert.hh"
@@ -11,7 +11,6 @@
 #include <boost/algorithm/string.hpp>
 #include <fmt/ranges.h>
 #include <seastar/core/fstream.hh>
-#include <seastar/http/short_streams.hh>
 #include <seastar/util/closeable.hh>
 #include <seastar/util/short_streams.hh>
 
@@ -238,6 +237,8 @@ std::vector<schema_ptr> do_load_schemas(const db::config& cfg, std::string_view 
 
     gms::feature_service feature_service(gms::feature_config_from_db_config(cfg));
     feature_service.enable(feature_service.supported_feature_set()).get();
+    feature_service.views_with_tablets.enable();
+
     sharded<locator::shared_token_metadata> token_metadata;
 
     auto my_address = gms::inet_address("localhost");

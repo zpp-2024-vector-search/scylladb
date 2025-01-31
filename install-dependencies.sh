@@ -259,6 +259,37 @@ minio_download_jobs() {
     rm -f ${cfile}
 }
 
+open_search_arch() {
+    local -A OPEN_SEARCH_ARCH=(
+        ["x86_64"]=x64
+        ["aarch64"]=arm64
+    )
+    echo ${OPEN_SEARCH_ARCH["$(arch)"]}
+}
+
+OPEN_SEARCH_VERSION=2.18.0
+declare -A OPEN_SEARCH_CHECKSUM=(
+    ["x86_64"]=ae3cb4107b2e0cdbb9b98bb4e5f2f019b736b68e995442c718e459d39ff01df1
+    ["aarch64"]= # TODO: Add the checksum for the "aarch64" architecture.
+)
+OPEN_SEARCH_DIR=/opt/scylladb/dependencies
+
+open_search_filename() {
+    echo "opensearch-$OPEN_SEARCH_VERSION-linux-$(open_search_arch).tar.gz"
+}
+
+open_search_fullpath() {
+    echo "$OPEN_SEARCH_DIR/$(open_search_filename)"
+}
+
+open_search_checksum() {
+    sha256sum "$(open_search_fullpath)" | while read -r sum _; do [[ "$sum" == "${OPEN_SEARCH_CHECKSUM["$(arch)"]}" ]]; done
+}
+
+open_search_url() {
+    echo "https://artifacts.opensearch.org/releases/bundle/opensearch/$OPEN_SEARCH_VERSION/$(open_search_filename)"
+}
+
 print_usage() {
     echo "Usage: install-dependencies.sh [OPTION]..."
     echo ""
@@ -365,6 +396,23 @@ elif [ "$ID" = "fedora" ]; then
         if ! node_exporter_checksum; then
             echo "$(node_exporter_filename) download failed"
             exit 1
+        fi
+    fi
+
+    if [ -f "$(open_search_fullpath)" ] && open_search_checksum; then
+        echo "$(open_search_filename) already exists, skipping download"
+    else
+        mkdir -p "$OPEN_SEARCH_DIR"
+        if curl -fSL -o "$(open_search_fullpath)" "$(open_search_url)";
+        then
+            if ! open_search_checksum; then
+                echo "$(open_search_filename) download failed"
+                exit 1
+            else
+                tar -C "$OPEN_SEARCH_DIR" -xvf "$(open_search_fullpath)"
+            fi
+        else
+            echo "$(open_search_url) is unreachable, skipping"
         fi
     fi
 elif [ "$ID" = "centos" ]; then

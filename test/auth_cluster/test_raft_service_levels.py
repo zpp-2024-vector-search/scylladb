@@ -10,7 +10,6 @@ import logging
 from test.pylib.rest_client import get_host_api_address, read_barrier
 from test.pylib.util import unique_name, wait_for_cql_and_get_hosts
 from test.pylib.manager_client import ManagerClient
-from test.pylib.opensearch_cluster import OpenSearchCluster
 from test.topology.util import trigger_snapshot, wait_until_topology_upgrade_finishes, enter_recovery_state, reconnect_driver, \
         delete_raft_topology_state, delete_raft_data_and_upgrade_state, wait_until_upgrade_finishes, wait_for_token_ring_and_group0_consistency
 from test.topology.conftest import skip_mode
@@ -21,13 +20,6 @@ from cassandra.auth import PlainTextAuthProvider
 
 
 logger = logging.getLogger(__name__)
-
-
-@pytest.mark.asyncio
-async def test_opensearch_basic():
-    cluster = OpenSearchCluster(logger)
-    await cluster.install_and_start()
-
 
 @pytest.mark.asyncio
 async def test_service_levels_snapshot(manager: ManagerClient):

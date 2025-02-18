@@ -45,6 +45,7 @@ from test.pylib.resource_gather import setup_cgroup, run_resource_watcher, get_r
 from test.pylib.util import LogPrefixAdapter
 from test.pylib.scylla_cluster import ScyllaServer, ScyllaCluster, get_cluster_manager, merge_cmdline_options
 from test.pylib.minio_server import MinioServer
+from test.pylib.opensearch_cluster import OpenSearchCluster
 from typing import Dict, List, Callable, Any, Iterable, Optional, Awaitable, Union
 import logging
 from test.pylib import coverage_utils
@@ -719,6 +720,28 @@ class TopologyTestSuite(PythonTestSuite):
         count in the CI report"""
         return []
 
+class OpensearchTestSuite(PythonTestSuite):
+    """A collection of Python pytests against an OpenSearch cluster."""
+
+    def build_test_list(self):
+        """Build list of OpenSearch python tests"""
+        return TestSuite.build_test_list(self)
+    
+    async def add_test(self, shortname: str, casename: str) -> None:
+        """Add test to suite"""
+        test = OpensearchTest(self.next_id((shortname, 'opensearch', self.mode)), shortname, casename, self)
+        self.tests.append(test)
+
+    @property
+    def pattern(self) -> str:
+        """Python pattern"""
+        return "test_*.py"
+    
+    # TODO: maybe remove?
+    def junit_tests(self):
+        """Return an empty list, since topology tests are excluded from an aggregated Junit report to prevent double
+        count in the CI report"""
+        return []
 
 class RunTestSuite(TestSuite):
     """TestSuite for test directory with a 'run' script """
@@ -1410,6 +1433,41 @@ class TopologyTest(PythonTest):
         return self
 
 
+class OpensearchTest(PythonTest):
+    """Run a pytest collection of cases against a standalone OpenSearch"""
+    status: bool
+
+    def __init__(self, test_no: int, shortname: str, casename: str, suite) -> None:
+        super().__init__(test_no, shortname, casename, suite)
+
+
+    # TODO: check, fix, adjust
+    async def run(self, options: argparse.Namespace) -> Test:
+
+        self._prepare_pytest_params(options)
+
+        test_path = os.path.join(self.suite.options.tmpdir, self.mode)
+        async with get_cluster_manager(self.uname, self.suite.clusters, test_path) as manager:
+            self.args.insert(0, "--tmpdir={}".format(options.tmpdir))
+            # self.args.insert(0, "--manager-api={}".format(manager.sock_path))
+            if options.artifacts_dir_url:
+                self.args.insert(0, "--artifacts_dir_url={}".format(options.artifacts_dir_url))
+
+            try:
+                # Note: start manager here so cluster (and its logs) is available in case of failure
+                await manager.start()
+                self.success = await run_test(self, options)
+            except Exception as e:
+                self.server_log = manager.cluster.read_server_log()
+                self.server_log_filename = manager.cluster.server_log_filename()
+                if not manager.is_before_test_ok:
+                    print("Test {} pre-check failed: {}".format(self.name, str(e)))
+                    print("Server log of the first server:\n{}".format(self.server_log))
+                    # Don't try to continue if the cluster is broken
+                    raise
+            manager.logger.info("Test %s %s", self.uname, "succeeded" if self.success else "failed ")
+        return self
+
 class ToolTest(Test):
     """Run a collection of pytest test cases
 
@@ -1899,6 +1957,12 @@ async def run_all_tests(signaled: asyncio.Event, options: argparse.Namespace) ->
                                     LogPrefixAdapter(logging.getLogger('s3_proxy'), {'prefix': 's3_proxy'}))
     await proxy_s3_server.start()
     TestSuite.artifacts.add_exit_artifact(None, proxy_s3_server.stop)
+
+    # TODO: one opensearch instance for every test.py run, is it ok?
+    # TODO: make it work :)
+    os_cluster = OpenSearchCluster()
+    await os_cluster.start()
+    TestSuite.artifacts.add_exit_artifact(None, os_cluster.stop)
 
     console.print_start_blurb()
     max_failures = options.max_failures

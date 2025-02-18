@@ -267,12 +267,14 @@ open_search_arch() {
     echo ${OPEN_SEARCH_ARCH["$(arch)"]}
 }
 
-OPEN_SEARCH_VERSION=2.18.0
+OPEN_SEARCH_VERSION=2.19.0
 declare -A OPEN_SEARCH_CHECKSUM=(
-    ["x86_64"]=ae3cb4107b2e0cdbb9b98bb4e5f2f019b736b68e995442c718e459d39ff01df1
+    ["x86_64"]=455b900182ef2a7193d443d96aaea55f534ec0f91b1bad6d2eacdbaea601f16e
     ["aarch64"]= # TODO: Add the checksum for the "aarch64" architecture.
 )
 OPEN_SEARCH_DIR=/opt/scylladb/dependencies
+# OPEN_SEARCH_BINARIES_DIR=/home/$(logname)/opensearch
+OPEN_SEARCH_BINARIES_DIR=$OPEN_SEARCH_DIR
 
 open_search_filename() {
     echo "opensearch-$OPEN_SEARCH_VERSION-linux-$(open_search_arch).tar.gz"
@@ -409,7 +411,10 @@ elif [ "$ID" = "fedora" ]; then
                 echo "$(open_search_filename) download failed"
                 exit 1
             else
-                tar -C "$OPEN_SEARCH_DIR" -xvf "$(open_search_fullpath)"
+                mkdir -p "$OPEN_SEARCH_BINARIES_DIR"
+                tar -C "$OPEN_SEARCH_BINARIES_DIR" -xvf "$(open_search_fullpath)"
+                echo "plugins.security.disabled: true" >> "$OPEN_SEARCH_BINARIES_DIR/opensearch-$OPEN_SEARCH_VERSION/config/opensearch.yml"
+                chown -R "$(logname):$(logname)" "$OPEN_SEARCH_BINARIES_DIR/opensearch-$OPEN_SEARCH_VERSION"
             fi
         else
             echo "$(open_search_url) is unreachable, skipping"

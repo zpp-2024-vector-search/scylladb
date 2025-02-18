@@ -38,3 +38,6 @@ async def test_opensearch_basic():
     response = client.cat.indices(format='json')
     for index in response:
         print(index['index'])
+
+    response = client.indices.delete(index_name)
+    print(f"Index deletion response: {response}")

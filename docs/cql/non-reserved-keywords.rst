@@ -74,7 +74,6 @@ Non-reserved keywords only have meaning in their particular area of context and 
 * VALUES	
 * VARCHAR	
 * VARINT	
-* VECTOR
 * WRITETIME	
 
 .. include:: /rst_include/apache-copyrights.rst

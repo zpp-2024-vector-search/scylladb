@@ -1951,7 +1951,6 @@ comparator_type [bool internal] returns [shared_ptr<cql3_type::raw> t]
     : n=native_or_internal_type[internal]     { $t = cql3_type::raw::from(n); }
     | c=collection_type[internal]   { $t = c; }
     | tt=tuple_type[internal]       { $t = tt; }
-    | vt=vector_type[internal]      { $t = vt; }
     | id=userTypeName   { $t = cql3::cql3_type::raw::user_type(std::move(id)); }
     | K_FROZEN '<' f=comparator_type[internal] '>'
       {
@@ -2036,11 +2035,6 @@ tuple_type [bool internal] returns [shared_ptr<cql3::cql3_type::raw> t]
       '>' { $t = cql3::cql3_type::raw::tuple(std::move(types)); }
     ;
 
-vector_type [bool internal] returns [shared_ptr<cql3::cql3_type::raw> pt]
-    : K_VECTOR '<' t=comparator_type[internal] ',' d=INTEGER '>'
-        { if (t) { $pt = cql3::cql3_type::raw::vector(t, std::stoul($d.text)); } }
-    ;
-
 username returns [sstring str]
     : t=IDENT { $str = $t.text; }
     | t=STRING_LITERAL { $str = $t.text; }
@@ -2106,7 +2100,6 @@ basic_unreserved_keyword returns [sstring str]
         | K_STATIC
         | K_FROZEN
         | K_TUPLE
-        | K_VECTOR
         | K_FUNCTION
         | K_FUNCTIONS
         | K_AGGREGATE
@@ -2299,7 +2292,6 @@ K_LIST:        L I S T;
 K_NAN:         N A N;
 K_INFINITY:    I N F I N I T Y;
 K_TUPLE:       T U P L E;
-K_VECTOR:      V E C T O R;
 
 K_TRIGGER:     T R I G G E R;
 K_STATIC:      S T A T I C;

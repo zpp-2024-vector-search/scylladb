@@ -400,9 +400,6 @@ static value_set possible_lhs_values(const column_definition* cdef,
                         [] (const collection_constructor&) -> value_set {
                             on_internal_error(expr_logger, "possible_lhs_values: collection constructors are not supported as the LHS of a binary expression");
                         },
-                        [] (const vector_constructor&) -> value_set {
-                            on_internal_error(expr_logger, "possible_lhs_values: vector constructors are not supported as the LHS of a binary expression");
-                        },
                         [] (const usertype_constructor&) -> value_set {
                             on_internal_error(expr_logger, "possible_lhs_values: user type constructors are not supported as the LHS of a binary expression");
                         },
@@ -443,9 +440,6 @@ static value_set possible_lhs_values(const column_definition* cdef,
             },
             [] (const collection_constructor&) -> value_set {
                 on_internal_error(expr_logger, "possible_lhs_values: a collection constructor cannot serve as a restriction by itself");
-            },
-            [] (const vector_constructor&) -> value_set {
-                on_internal_error(expr_logger, "possible_lhs_values: a vector constructor cannot serve as a restriction by itself");
             },
             [] (const usertype_constructor&) -> value_set {
                 on_internal_error(expr_logger, "possible_lhs_values: a user type constructor cannot serve as a restriction by itself");
@@ -545,9 +539,6 @@ secondary_index::index::supports_expression_v is_supported_by_helper(const expre
                         },
                         [&] (const collection_constructor&) -> ret_t {
                             on_internal_error(expr_logger, "is_supported_by: collection constructors are not supported as the LHS of a binary expression");
-                        },
-                        [&] (const vector_constructor&) -> ret_t {
-                            on_internal_error(expr_logger, "is_supported_by: vector constructors are not supported as the LHS of a binary expression");
                         },
                         [&] (const usertype_constructor&) -> ret_t {
                             on_internal_error(expr_logger, "is_supported_by: user type constructors are not supported as the LHS of a binary expression");
@@ -701,7 +692,6 @@ std::vector<expression> extract_single_column_restrictions_for_column(const expr
         void operator()(const untyped_constant&) {}
         void operator()(const tuple_constructor&) {}
         void operator()(const collection_constructor&) {}
-        void operator()(const vector_constructor&) {}
         void operator()(const usertype_constructor&) {}
         void operator()(const temporary&) {}
     };
@@ -939,10 +929,6 @@ static std::vector<expr::expression> extract_partition_range(
             on_internal_error(rlogger, "extract_partition_range(collection_constructor)");
         }
 
-        void operator()(const vector_constructor&) {
-            on_internal_error(rlogger, "extract_partition_range(vector_constructor)");
-        }
-
         void operator()(const usertype_constructor&) {
             on_internal_error(rlogger, "extract_partition_range(usertype_constructor)");
         }
@@ -1069,10 +1055,6 @@ static std::vector<expr::expression> extract_clustering_prefix_restrictions(
 
         void operator()(const collection_constructor&) {
             on_internal_error(rlogger, "extract_clustering_prefix_restrictions(collection_constructor)");
-        }
-
-        void operator()(const vector_constructor&) {
-            on_internal_error(rlogger, "extract_clustering_prefix_restrictions(vector_constructor)");
         }
 
         void operator()(const usertype_constructor&) {
@@ -2234,10 +2216,6 @@ struct multi_column_range_accumulator {
 
     void operator()(const collection_constructor&) {
         on_internal_error(rlogger, "collection constructor encountered outside binary operator");
-    }
-
-    void operator()(const vector_constructor&) {
-        on_internal_error(rlogger, "vector constructor encountered outside binary operator");
     }
 
     void operator()(const usertype_constructor&) {

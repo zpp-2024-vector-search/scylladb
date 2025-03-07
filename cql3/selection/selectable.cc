@@ -73,9 +73,6 @@ selectable_processes_selection(const expr::expression& selectable) {
         [&] (const expr::collection_constructor&) -> bool {
             on_internal_error(slogger, "collection_constructor found its way to selector context");
         },
-        [&] (const expr::vector_constructor&) -> bool {
-            on_internal_error(slogger, "vector_constructor found its way to selector context");
-        },
         [&] (const expr::usertype_constructor&) -> bool {
             on_internal_error(slogger, "collection_constructor found its way to selector context");
         },

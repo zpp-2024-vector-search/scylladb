@@ -813,6 +813,14 @@
                           "allowMultiple":false,
                           "type":"string",
                           "paramType":"query"
+                      },
+                      {
+                          "name":"move_files",
+                          "description":"Move component files instead of copying them",
+                          "required":false,
+                          "allowMultiple":false,
+                          "type":"boolean",
+                          "paramType":"query"
                       }
                   ]
               }
@@ -2836,7 +2844,7 @@
                "nickname":"repair_tablet",
                "method":"POST",
                "summary":"Repair a tablet",
-               "type":"void",
+               "type":"tablet_repair_result",
                "produces":[
                   "application/json"
                ],
@@ -2861,6 +2869,30 @@
                      "name":"tokens",
                      "description":"Tokens owned by the tablets to repair. Multiple tokens can be provided using a comma-separated list. When set to the special word 'all', all tablets will be repaired",
                      "required":true,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"query"
+                  },
+                  {
+                     "name":"hosts_filter",
+                     "description":"Repair replicas listed in the comma-separated host_id list.",
+                     "required":false,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"query"
+                  },
+                  {
+                     "name":"dcs_filter",
+                     "description":"Repair replicas listed in the comma-separated DC list",
+                     "required":false,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"query"
+                  },
+                  {
+                     "name":"await_completion",
+                     "description":"Set true to wait for the repair to complete. Set false to skip waiting for the repair to complete. When the option is not provided, it defaults to false.",
+                     "required":false,
                      "allowMultiple":false,
                      "type":"string",
                      "paramType":"query"
@@ -3285,6 +3317,15 @@
                 "items":{
                     "$ref":"sstable"
                 }
+            }
+        }
+      },
+      "tablet_repair_result":{
+        "id":"tablet_repair_result",
+        "description":"Tablet repair result",
+        "properties":{
+            "tablet_task_id":{
+                "type":"string"
             }
         }
       }

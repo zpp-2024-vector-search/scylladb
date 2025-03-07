@@ -6,13 +6,12 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-#include <boost/range/irange.hpp>
 #include "seastarx.hh"
 #include "test/lib/simple_schema.hh"
 #include "test/lib/log.hh"
 #include <seastar/core/app-template.hh>
 #include "replica/memtable.hh"
-#include "row_cache.hh"
+#include "db/row_cache.hh"
 #include "partition_slice_builder.hh"
 #include "utils/assert.hh"
 #include "utils/int_range.hh"

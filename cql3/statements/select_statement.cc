@@ -301,42 +301,40 @@ select_statement::make_partition_slice(const query_options& options) const
         ++_stats.reverse_queries;
     }
 
-    const uint64_t per_partition_limit = get_inner_loop_limit(get_limit(options, _per_partition_limit),
+    const uint64_t per_partition_limit = get_inner_loop_limit(get_limit(options, _per_partition_limit, true),
         _selection->is_aggregate());
     return query::partition_slice(std::move(bounds),
         std::move(static_columns), std::move(regular_columns), _opts, nullptr, per_partition_limit);
 }
 
-select_statement::get_limit_result select_statement::get_limit(
-    const query_options& options, const std::optional<expr::expression>& limit, bool is_per_partition_limit) const
+uint64_t select_statement::get_limit(const query_options& options, const std::optional<expr::expression>& limit, bool is_per_partition_limit) const
 {
-    if (!limit.has_value()) {
-        return bo::success(query::max_rows);
+    const auto& unset_guard = is_per_partition_limit ? _per_partition_limit_unset_guard : _limit_unset_guard;
+    if (!limit.has_value() || unset_guard.is_unset(options)) {
+        return query::max_rows;
     }
     try {
         auto val = expr::evaluate(*limit, options);
         if (val.is_null()) {
-            return bo::failure(exceptions::invalid_request_exception("Invalid null value of limit"));
+            throw exceptions::invalid_request_exception("Invalid null value of limit");
         }
         auto l = val.view().validate_and_deserialize<int32_t>(*int32_type);
         if (l <= 0) {
             auto msg = is_per_partition_limit ? "PER PARTITION LIMIT must be strictly positive" : "LIMIT must be strictly positive";
-            return bo::failure(exceptions::invalid_request_exception(msg));
+            throw exceptions::invalid_request_exception(msg);
         }
-        return bo::success(l);
+        return l;
     } catch (const marshal_exception& e) {
-        return bo::failure(exceptions::invalid_request_exception("Invalid limit value"));
-    } catch (const exceptions::invalid_request_exception& e) {
-        return bo::failure(e);
+        throw exceptions::invalid_request_exception("Invalid limit value");
     }
 }
 
-uint64_t select_statement::get_inner_loop_limit(const select_statement::get_limit_result& limit, bool is_aggregate)
+uint64_t select_statement::get_inner_loop_limit(uint64_t limit, bool is_aggregate)
 {
-    if (!limit.has_value() || is_aggregate) {
+    if (is_aggregate) {
         return query::max_rows;
     }
-    return limit.value();
+    return limit;
 }
 
 bool select_statement::needs_post_query_ordering() const {
@@ -419,8 +417,8 @@ select_statement::do_execute(query_processor& qp,
             options.get_timestamp(state));
     command->allow_limit = db::allow_per_partition_rate_limit::yes;
     logger.trace("Executing read query (reversed {}): table schema {}, query schema {}",
-        slice.is_reversed(), _schema->version(), _query_schema->version());
-    tracing::trace(state.get_trace_state(), "Executing read query (reversed {})", slice.is_reversed());
+        command->slice.is_reversed(), _schema->version(), _query_schema->version());
+    tracing::trace(state.get_trace_state(), "Executing read query (reversed {})", command->slice.is_reversed());
 
     int32_t page_size = options.get_page_size();
 
@@ -472,7 +470,7 @@ select_statement::do_execute(query_processor& qp,
     } else {
         f = execute_without_checking_exception_message_aggregate_or_paged(qp, command,
             std::move(key_ranges), state, options, now, page_size, aggregate,
-            nonpaged_filtering, parsed_limit.has_value() ? parsed_limit.value() : query::max_rows);
+            nonpaged_filtering, parsed_limit);
     }
 
     if (!tablet_info.has_value()) {
@@ -499,7 +497,7 @@ select_statement::execute_without_checking_exception_message_aggregate_or_paged(
     auto per_partition_limit = get_limit(options, _per_partition_limit, true);
 
     if (aggregate || nonpaged_filtering) {
-        auto builder = cql3::selection::result_set_builder(*_selection, now, &options, *_group_by_cell_indices, limit, per_partition_limit.value());
+        auto builder = cql3::selection::result_set_builder(*_selection, now, &options, *_group_by_cell_indices, limit, per_partition_limit);
         coordinator_result<void> result_void = co_await utils::result_do_until(
                 [&p, &builder, limit] {
                     return p->is_exhausted() || (limit < builder.result_set_size());
@@ -1119,7 +1117,7 @@ lw_shared_ptr<const service::pager::paging_state> indexed_table_select_statement
     paging_state_copy->set_remaining(internal_paging_size);
     paging_state_copy->set_partition_key(std::move(index_pk));
     paging_state_copy->set_clustering_key(std::move(index_ck));
-    return std::move(paging_state_copy);
+    return paging_state_copy;
 }
 
 future<shared_ptr<cql_transport::messages::result_message>>
@@ -2383,8 +2381,12 @@ select_statement::ordering_comparator_type select_statement::get_ordering_compar
 
 void select_statement::validate_distinct_selection(const schema& schema,
                                                    const selection::selection& selection,
-                                                   const restrictions::statement_restrictions& restrictions)
+                                                   const restrictions::statement_restrictions& restrictions) const
 {
+    if (_per_partition_limit) {
+        throw exceptions::invalid_request_exception("PER PARTITION LIMIT is not allowed with SELECT DISTINCT queries");
+    }
+
     if (restrictions.has_non_primary_key_restriction() || restrictions.has_clustering_columns_restriction()) {
         throw exceptions::invalid_request_exception(
             "SELECT DISTINCT with WHERE clause only supports restriction by partition key.");

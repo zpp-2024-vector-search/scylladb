@@ -10,6 +10,7 @@
 #include <seastar/core/gate.hh>
 #include <seastar/core/abort_source.hh>
 
+#include "data_dictionary/data_dictionary.hh"
 #include "service/broadcast_tables/experimental/lang.hh"
 #include "raft/raft.hh"
 #include "service/raft/group0_state_id_handler.hh"
@@ -106,6 +107,7 @@ class group0_state_machine : public raft_state_machine {
     abort_source _abort_source;
     bool _topology_change_enabled;
     group0_state_id_handler _state_id_handler;
+    gms::feature_service& _feature_service;
     gms::feature::listener_registration _topology_on_raft_support_listener;
 
     modules_to_reload get_modules_to_reload(const std::vector<canonical_mutation>& mutations);
@@ -121,5 +123,10 @@ public:
     future<> transfer_snapshot(raft::server_id from_id, raft::snapshot_descriptor snp) override;
     future<> abort() override;
 };
+
+bool should_flush_system_topology_after_applying(const mutation& mut, const data_dictionary::database db);
+
+// Used to write data to topology and other tables except schema tables.
+future<> write_mutations_to_database(storage_proxy& proxy, gms::inet_address from, std::vector<canonical_mutation> cms);
 
 } // end of namespace service

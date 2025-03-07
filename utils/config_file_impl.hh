@@ -9,8 +9,10 @@
 
 #pragma once
 
-#include <boost/any.hpp>
 #include <boost/regex.hpp>
+#include <boost/program_options/errors.hpp>
+#include <boost/program_options/value_semantic.hpp>
+#include <boost/lexical_cast.hpp>
 #include <yaml-cpp/node/convert.h>
 
 #include <seastar/core/smp.hh>
@@ -26,6 +28,9 @@ T config_from_string(std::string_view string_representation) {
 
 template <>
 bool config_from_string(std::string_view string_representation);
+
+template <>
+sstring config_from_string(std::string_view string_representation);
 
 }
 
@@ -202,9 +207,8 @@ void utils::config_file::named_value<T>::add_command_line_option(boost::program_
 }
 
 template<typename T>
-void utils::config_file::named_value<T>::set_value(const YAML::Node& node) {
-    if (_source == config_source::SettingsFile && _liveness != liveness::LiveUpdate) {
-        // FIXME: warn if different?
+void utils::config_file::named_value<T>::set_value(const YAML::Node& node, config_source previous_src) {
+    if (previous_src == config_source::SettingsFile && _liveness != liveness::LiveUpdate) {
         return;
     }
     (*this)(node.as<T>());
@@ -219,18 +223,6 @@ bool utils::config_file::named_value<T>::set_value(sstring value, config_source 
 
     (*this)(config_from_string<T>(value), src);
     return true;
-}
-
-template<typename T>
-future<> utils::config_file::named_value<T>::set_value_on_all_shards(const YAML::Node& node) {
-    if (_source == config_source::SettingsFile && _liveness != liveness::LiveUpdate) {
-        // FIXME: warn if different?
-        co_return;
-    }
-    co_await smp::invoke_on_all([this, value = node.as<T>()] () {
-        (*this)(value);
-    });
-    _source = config_source::SettingsFile;
 }
 
 template<typename T>

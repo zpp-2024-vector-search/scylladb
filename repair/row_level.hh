@@ -95,7 +95,7 @@ class repair_service : public seastar::peering_sharded_service<repair_service> {
     sharded<service::storage_proxy>& _sp;
     sharded<db::batchlog_manager>& _bm;
     sharded<db::system_keyspace>& _sys_ks;
-    sharded<db::view::view_builder>& _view_builder;
+    db::view::view_builder& _view_builder;
     shared_ptr<repair::task_manager_module> _repair_module;
     service::migration_manager& _mm;
     node_ops_metrics _node_ops_metrics;
@@ -106,8 +106,6 @@ class repair_service : public seastar::peering_sharded_service<repair_service> {
 
     shared_ptr<row_level_repair_gossip_helper> _gossip_helper;
     bool _stopped = false;
-
-    gate _gate;
 
     size_t _max_repair_memory;
     seastar::semaphore _memory_sem;
@@ -134,7 +132,7 @@ public:
             sharded<service::storage_proxy>& sp,
             sharded<db::batchlog_manager>& bm,
             sharded<db::system_keyspace>& sys_ks,
-            sharded<db::view::view_builder>& vb,
+            db::view::view_builder& vb,
             tasks::task_manager& tm,
             service::migration_manager& mm, size_t max_repair_memory);
     ~repair_service();
@@ -177,7 +175,7 @@ private:
 public:
     future<> repair_tablets(repair_uniq_id id, sstring keyspace_name, std::vector<sstring> table_names, bool primary_replica_only = true, dht::token_range_vector ranges_specified = {}, std::vector<sstring> dcs = {}, std::unordered_set<locator::host_id> hosts = {}, std::unordered_set<locator::host_id> ignore_nodes = {}, std::optional<int> ranges_parallelism = std::nullopt);
 
-    future<gc_clock::time_point> repair_tablet(gms::gossip_address_map& addr_map, locator::tablet_metadata_guard& guard, locator::global_tablet_id gid);
+    future<gc_clock::time_point> repair_tablet(gms::gossip_address_map& addr_map, locator::tablet_metadata_guard& guard, locator::global_tablet_id gid, tasks::task_info global_tablet_repair_task_info);
 private:
 
     future<repair_update_system_table_response> repair_update_system_table_handler(
@@ -192,12 +190,11 @@ public:
     netw::messaging_service& get_messaging() noexcept { return _messaging; }
     sharded<replica::database>& get_db() noexcept { return _db; }
     service::migration_manager& get_migration_manager() noexcept { return _mm; }
-    sharded<db::view::view_builder>& get_view_builder() noexcept { return _view_builder; }
+    db::view::view_builder& get_view_builder() noexcept { return _view_builder; }
     gms::gossiper& get_gossiper() noexcept { return _gossiper.local(); }
     size_t max_repair_memory() const { return _max_repair_memory; }
     seastar::semaphore& memory_sem() { return _memory_sem; }
     locator::host_id my_host_id() const noexcept;
-    gate& async_gate() noexcept { return _gate; }
 
     repair::task_manager_module& get_repair_module() noexcept {
         return *_repair_module;

@@ -13,7 +13,8 @@ Requires:       %{product}-python3 = %{version}-%{release}
 Requires:       %{product}-kernel-conf = %{version}-%{release}
 Requires:       %{product}-node-exporter = %{version}-%{release}
 Requires:       %{product}-cqlsh = %{version}-%{release}
-Obsoletes:      scylla-server < 1.1
+Provides:       scylla-enterprise = %{version}-%{release}
+Obsoletes:      scylla-enterprise < 2025.1.0
 
 %global _debugsource_template %{nil}
 %global _debuginfo_subpackages %{nil}
@@ -73,6 +74,10 @@ Requires:       %{product}-python3 = %{version}-%{release}
 AutoReqProv:    no
 Provides:       %{product}-tools:%{_bindir}/nodetool
 Provides:       %{product}-tools:%{_sysconfigdir}/bash_completion.d/nodetool-completion
+Provides:       scylla-enterprise-tools:%{_bindir}/nodetool
+Provides:       scylla-enterprise-tools:%{_sysconfigdir}/bash_completion.d/nodetool-completion
+Provides:       scylla-enterprise-server = %{version}-%{release}
+Obsoletes:      scylla-enterprise-server < 2025.1.0
 
 %description server
 This package contains ScyllaDB server.
@@ -132,6 +137,7 @@ ln -sfT /etc/scylla /var/lib/scylla/conf
 /opt/scylladb/scyllatop/*
 /opt/scylladb/bin/*
 /opt/scylladb/libreloc/*
+/opt/scylladb/libreloc/.*.hmac
 /opt/scylladb/libexec/*
 %{_prefix}/lib/scylla/*
 %attr(0755,scylla,scylla) %dir %{_sharedstatedir}/scylla/
@@ -156,6 +162,8 @@ ln -sfT /etc/scylla /var/lib/scylla/conf
 Group:          Applications/Databases
 Summary:        Scylla configuration package
 Obsoletes:      scylla-server < 1.1
+Provides:       scylla-enterprise-conf = %{version}-%{release}
+Obsoletes:      scylla-enterprise-conf < 2025.1.0
 
 %description conf
 This package contains the main scylla configuration file.
@@ -176,6 +184,8 @@ Summary:        Scylla configuration package for the Linux kernel
 Requires:       kmod
 # tuned overwrites our sysctl settings
 Obsoletes:      tuned >= 2.11.0
+Provides:       scylla-enterprise-kernel-conf = %{version}-%{release}
+Obsoletes:      scylla-enterprise-kernel-conf < 2025.1.0
 
 %description kernel-conf
 This package contains Linux kernel configuration changes for the Scylla database.  Install this package
@@ -212,6 +222,8 @@ Group:          Applications/Databases
 Summary:        Prometheus exporter for machine metrics
 License:        ASL 2.0
 URL:            https://github.com/prometheus/node_exporter
+Provides:       scylla-enterprise-node-exporter = %{version}-%{release}
+Obsoletes:      scylla-enterprise-node-exporter < 2025.1.0
 
 %description node-exporter
 Prometheus exporter for machine metrics, written in Go with pluggable metric collectors.

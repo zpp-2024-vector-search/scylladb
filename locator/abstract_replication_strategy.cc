@@ -10,7 +10,6 @@
 #include "locator/tablet_replication_strategy.hh"
 #include "utils/class_registrator.hh"
 #include "exceptions/exceptions.hh"
-#include <boost/range/algorithm/remove_if.hpp>
 #include <fmt/ranges.h>
 #include <seastar/core/coroutine.hh>
 #include <seastar/coroutine/maybe_yield.hh>
@@ -73,25 +72,6 @@ abstract_replication_strategy::ptr_type abstract_replication_strategy::create_re
         return create_object<abstract_replication_strategy, replication_strategy_params>(strategy_name, std::move(params));
     } catch (const no_such_class& e) {
         throw exceptions::configuration_exception(e.what());
-    }
-}
-
-void abstract_replication_strategy::validate_replication_strategy(const sstring& ks_name,
-                                                                  const sstring& strategy_name,
-                                                                  replication_strategy_params params,
-                                                                  const gms::feature_service& fs,
-                                                                  const topology& topology)
-{
-    auto strategy = create_replication_strategy(strategy_name, params);
-    strategy->validate_options(fs);
-    auto expected = strategy->recognized_options(topology);
-    if (expected) {
-        for (auto&& item : params.options) {
-            sstring key = item.first;
-            if (!expected->contains(key)) {
-                 throw exceptions::configuration_exception(format("Unrecognized strategy option {{{}}} passed to {} for keyspace {}", key, strategy_name, ks_name));
-            }
-        }
     }
 }
 
@@ -657,6 +637,8 @@ future<> global_vnode_effective_replication_map::get_keyspace_erms(sharded<repli
         // all under the lock.
         auto lk = co_await db.get_shared_token_metadata().get_lock();
         auto erm = db.find_keyspace(keyspace_name).get_vnode_effective_replication_map();
+        utils::get_local_injector().inject("get_keyspace_erms_throw_no_such_keyspace",
+                [&keyspace_name] { throw data_dictionary::no_such_keyspace{keyspace_name}; });
         auto ring_version = erm->get_token_metadata().get_ring_version();
         _erms[0] = make_foreign(std::move(erm));
         co_await coroutine::parallel_for_each(std::views::iota(1u, smp::count), [this, &sharded_db, keyspace_name, ring_version] (unsigned shard) -> future<> {

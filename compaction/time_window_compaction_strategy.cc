@@ -13,10 +13,6 @@
 #include "sstables/sstables.hh"
 #include "compaction_strategy_state.hh"
 
-#include <boost/range/algorithm/find.hpp>
-#include <boost/range/algorithm/remove_if.hpp>
-#include <boost/range/algorithm/min_element.hpp>
-
 #include <ranges>
 
 namespace sstables {
@@ -167,7 +163,7 @@ public:
     explicit classify_by_timestamp(time_window_compaction_strategy_options options) : _options(std::move(options)) { }
     int64_t operator()(api::timestamp_type ts) {
         const auto window = time_window_compaction_strategy::get_window_for(_options, ts);
-        if (const auto it = boost::range::find(_known_windows, window); it != _known_windows.end()) {
+        if (const auto it = std::ranges::find(_known_windows, window); it != _known_windows.end()) {
             std::swap(*it, _known_windows.front());
             return window;
         }
@@ -400,14 +396,13 @@ time_window_compaction_strategy::get_next_non_expired_sstables(table_state& tabl
 
     // if there is no sstable to compact in standard way, try compacting single sstable whose droppable tombstone
     // ratio is greater than threshold.
-    auto e = boost::range::remove_if(non_expiring_sstables, [this, compaction_time, &table_s] (const shared_sstable& sst) -> bool {
+    std::erase_if(non_expiring_sstables, [this, compaction_time, &table_s] (const shared_sstable& sst) -> bool {
         return !worth_dropping_tombstones(sst, compaction_time, table_s);
     });
-    non_expiring_sstables.erase(e, non_expiring_sstables.end());
     if (non_expiring_sstables.empty()) {
         return {};
     }
-    auto it = boost::min_element(non_expiring_sstables, [] (auto& i, auto& j) {
+    auto it = std::ranges::min_element(non_expiring_sstables, [] (auto& i, auto& j) {
         return i->get_stats_metadata().min_timestamp < j->get_stats_metadata().min_timestamp;
     });
     return { *it };

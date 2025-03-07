@@ -5,11 +5,11 @@ Encryption at Rest
 Introduction
 ----------------------
 
-ScyllaDB Enterprise protects your sensitive data with data-at-rest encryption. 
+ScyllaDB protects your sensitive data with data-at-rest encryption. 
 It protects the privacy of your user's data, reduces the risk of data breaches, and helps meet regulatory requirements. 
 In particular, it provides an additional level of protection for your data persisted in storage or its backups.
 
-When ScyllaDB Enterprise Encryption at Rest is used together with Encryption in Transit (:doc:`Node to Node </operating-scylla/security/node-node-encryption>`  and :doc:`Client to Node </operating-scylla/security/client-node-encryption>`), you benefit from end to end data encryption.
+When ScyllaDB's Encryption at Rest is used together with Encryption in Transit (:doc:`Node to Node </operating-scylla/security/node-node-encryption>`  and :doc:`Client to Node </operating-scylla/security/client-node-encryption>`), you benefit from end to end data encryption.
 
 About Encryption at Rest
 -----------------------------
@@ -142,8 +142,6 @@ Depending on your key provider, you will either have the option of allowing Scyl
 * KMS Key Provider - you must generate a key yourself in AWS
 * Replicated Key Provider - you must generate a system key yourself
 * Local Key Provider - If you do not generate your own secret key, ScyllaDB will create one for you
-
-When encrypting ScyllaDB config by ``configuration_encryptor``, you also need to generate a secret key and upload the key to all nodes.
 
 
 Use the key generator script
@@ -282,8 +280,6 @@ If you are using :term:`KMIP <Key Management Interoperability Protocol (KMIP)>` 
 Set the KMS Host
 ----------------------
 
-.. note:: KMS support is available since ScyllaDB Enterprise **2023.1.1**.
-
 If you are using AWS KMS to encrypt tables or system information, add the KMS information to the ``scylla.yaml`` configuration file. 
 
 #. Edit the ``scylla.yaml`` file located in ``/etc/scylla/`` to add the following in KMS host(s) section:
@@ -407,10 +403,6 @@ If you are using Google GCP KMS to encrypt tables or system information, add the
 
 Encrypt Tables
 -----------------------------
-
-.. note::
-
-   This feature is available since ScyllaDB Enterprise 2023.1.2.
 
 ScyllaDB allows you to enable or disable default encryption of tables. 
 When enabled, tables will be encrypted by default using the configuration 
@@ -820,32 +812,6 @@ Once this encryption is enabled, it is used for all system data.
 
    .. wasn't able to test this successfully
 
-.. Encrypt and Decrypt Configuration Files
-.. =======================================
-
-.. Using the Configuration Encryption tool, you can encrypt parts of the scylla.yaml file which contain encryption configuration settings. 
-
-.. **Procedure**
-
-.. 1.  Run the Configuration Encryption script:
-
-.. test code-block: none
-
-.. /bin/configuration_encryptor [options] [key-path]
-
-.. Where:
-
-.. * ``-c, --config`` - the path to the configuration file (/etc/scylla/scylla.yaml, for example)
-.. * ``-d, --decrypt`` - decrypts the configuration file at the specified path
-.. * ``-o, --output`` - (optional) writes the configuration file to a specified target. This can be the same location as the source file. 
-.. * ``-h. --help`` - help for this command
-
-.. For example:
-
-.. test code-block: none
-
-.. sudo -u scylla /bin/configuration_encryptor -c /etc/scylla/scylla.yaml /etc/scylla/encryption_keys/secret_key
-.. end of test
 
 When a Key is Lost
 ----------------------

@@ -11,10 +11,6 @@
 #include "compaction_manager.hh"
 #include "incremental_compaction_strategy.hh"
 #include "incremental_backlog_tracker.hh"
-#include <boost/algorithm/cxx11/any_of.hpp>
-#include <boost/range/numeric.hpp>
-#include <boost/range/algorithm.hpp>
-#include <boost/range/adaptors.hpp>
 #include <ranges>
 
 namespace sstables {
@@ -152,7 +148,7 @@ bool incremental_compaction_strategy::is_bucket_interesting(const std::vector<ss
 }
 
 bool incremental_compaction_strategy::is_any_bucket_interesting(const std::vector<std::vector<sstables::frozen_sstable_run>>& buckets, size_t min_threshold) const {
-    return boost::algorithm::any_of(buckets, [&] (const std::vector<sstables::frozen_sstable_run>& bucket) {
+    return std::ranges::any_of(buckets, [&] (const std::vector<sstables::frozen_sstable_run>& bucket) {
         return this->is_bucket_interesting(bucket, min_threshold);
     });
 }
@@ -282,7 +278,7 @@ incremental_compaction_strategy::find_garbage_collection_job(const compaction::t
     };
     auto compaction_time = gc_clock::now();
     auto can_garbage_collect = [&] (const size_bucket_t& bucket) {
-        return boost::algorithm::any_of(bucket, [&] (const frozen_sstable_run& r) {
+        return std::ranges::any_of(bucket, [&] (const frozen_sstable_run& r) {
             return worth_dropping_tombstones(*r, compaction_time);
         });
     };
@@ -418,11 +414,10 @@ int64_t incremental_compaction_strategy::estimated_pending_compactions(table_sta
 
 std::vector<shared_sstable>
 incremental_compaction_strategy::runs_to_sstables(std::vector<frozen_sstable_run> runs) {
-    return boost::accumulate(runs, std::vector<shared_sstable>(), [&] (std::vector<shared_sstable>&& v, const frozen_sstable_run& run_ptr) {
-        auto& run = *run_ptr;
-        v.insert(v.end(), run.all().begin(), run.all().end());
-        return std::move(v);
-    });
+    return runs
+        | std::views::transform([] (auto& run) -> auto& { return run->all(); })
+        | std::views::join
+        | std::ranges::to<std::vector>();
 }
 
 std::vector<frozen_sstable_run>
@@ -441,8 +436,8 @@ void incremental_compaction_strategy::sort_run_bucket_by_first_key(size_bucket_t
         auto sst_first_key_less = [&schema] (const shared_sstable& sst_a, const shared_sstable& sst_b) {
             return sst_a->get_first_decorated_key().tri_compare(*schema, sst_b->get_first_decorated_key()) <= 0;
         };
-        auto& a_first = *boost::min_element(a->all(), sst_first_key_less);
-        auto& b_first = *boost::min_element(b->all(), sst_first_key_less);
+        auto& a_first = *std::ranges::min_element(a->all(), sst_first_key_less);
+        auto& b_first = *std::ranges::min_element(b->all(), sst_first_key_less);
         return a_first->get_first_decorated_key().tri_compare(*schema, b_first->get_first_decorated_key()) <= 0;
     });
 }

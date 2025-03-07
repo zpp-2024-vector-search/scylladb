@@ -12,10 +12,6 @@
 #include <seastar/util/defer.hh>
 
 #include <boost/icl/interval_map.hpp>
-#include <boost/range/adaptor/map.hpp>
-#include <boost/range/algorithm/remove_if.hpp>
-#include <boost/range/algorithm/copy.hpp>
-#include <boost/range/numeric.hpp>
 
 #include "sstables.hh"
 
@@ -130,7 +126,8 @@ sstable_set::sstable_set(std::unique_ptr<sstable_set_impl> impl)
 {}
 
 sstable_set::sstable_set(const sstable_set& x)
-        : _impl(x._impl->clone())
+        : enable_lw_shared_from_this<sstable_set>()
+        , _impl(x._impl->clone())
 {}
 
 sstable_set::sstable_set(sstable_set&&) noexcept = default;
@@ -325,12 +322,9 @@ std::unique_ptr<sstable_set_impl> partitioned_sstable_set::clone() const {
 }
 
 std::vector<shared_sstable> partitioned_sstable_set::select(const dht::partition_range& range) const {
-    auto ipair = query(range);
-    auto b = std::move(ipair.first);
-    auto e = std::move(ipair.second);
     value_set result;
-    while (b != e) {
-        boost::copy(b++->second, std::inserter(result, result.end()));
+    for (auto [b, e] = query(range); b != e; ++b) {
+        std::ranges::copy(b->second, std::inserter(result, result.end()));
     }
     auto r = _unleveled_sstables;
     r.insert(r.end(), result.begin(), result.end());
@@ -890,7 +884,7 @@ make_sstable_filter(const dht::ring_position& pos, const schema& schema, const s
 static std::vector<shared_sstable>
 filter_sstable_for_reader(std::vector<shared_sstable>&& sstables, const schema& schema, const dht::ring_position& pos, const sstable_predicate& predicate) {
     auto filter = [_filter = make_sstable_filter(pos, schema, predicate)] (const shared_sstable& sst) { return !_filter(*sst); };
-    sstables.erase(boost::remove_if(sstables, filter), sstables.end());
+    std::erase_if(sstables, filter);
     return std::move(sstables);
 }
 

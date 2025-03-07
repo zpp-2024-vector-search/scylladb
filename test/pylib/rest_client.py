@@ -241,8 +241,8 @@ class ScyllaRESTAPIClient():
         """
         return await self.client.get_json(f"/v2/error_injection/injection/{injection}", host=node_ip)
 
-    async def move_tablet(self, node_ip: str, ks: str, table: str, src_host: HostID, src_shard: int, dst_host: HostID, dst_shard: int, token: int) -> None:
-        await self.client.post(f"/storage_service/tablets/move", host=node_ip, params={
+    async def move_tablet(self, node_ip: str, ks: str, table: str, src_host: HostID, src_shard: int, dst_host: HostID, dst_shard: int, token: int, timeout: Optional[float] = None) -> None:
+        await self.client.post(f"/storage_service/tablets/move", host=node_ip, timeout=timeout, params={
             "ks": ks,
             "table": table,
             "src_host": str(src_host),
@@ -273,12 +273,19 @@ class ScyllaRESTAPIClient():
             "token": str(token)
         })
 
-    async def tablet_repair(self, node_ip: str, ks: str, table: str, token : int, timeout: Optional[float] = None) -> None:
-        await self.client.post(f"/storage_service/tablets/repair", host=node_ip, timeout=timeout, params={
+    async def tablet_repair(self, node_ip: str, ks: str, table: str, token : int, hosts_filter: Optional[str] = None, dcs_filter: Optional[str] = None, timeout: Optional[float] = None, await_completion: bool = True) -> None:
+        params={
             "ks": ks,
             "table": table,
-            "tokens": str(token)
-        })
+            "tokens": str(token),
+            "await_completion": str(await_completion).lower()
+        }
+        if hosts_filter:
+            params["hosts_filter"] = hosts_filter
+        if dcs_filter:
+            params["dcs_filter"] = dcs_filter
+        res = await self.client.post_json(f"/storage_service/tablets/repair", host=node_ip, timeout=timeout, params=params)
+        return res
 
     async def enable_tablet_balancing(self, node_ip: str) -> None:
         await self.client.post(f"/storage_service/tablets/balancing", host=node_ip, params={"enabled": "true"})
@@ -318,7 +325,7 @@ class ScyllaRESTAPIClient():
         """Flush all keyspaces"""
         await self.client.post(f"/storage_service/flush", host=node_ip)
 
-    async def backup(self, node_ip: str, ks: str, table: str, tag: str, dest: str, bucket: str, prefix: str) -> str:
+    async def backup(self, node_ip: str, ks: str, table: str, tag: str, dest: str, bucket: str, prefix: str, **kwargs) -> str:
         """Backup keyspace's snapshot"""
         params = {"keyspace": ks,
                   "table": table,
@@ -326,6 +333,13 @@ class ScyllaRESTAPIClient():
                   "bucket": bucket,
                   "prefix": prefix,
                   "snapshot": tag}
+        # add optional args. for instance, "move_files".
+        for key, value in kwargs.items():
+            if isinstance(value, bool):
+                params[key] = 'true' if value else 'false'
+            else:
+                assert any(isinstance(value, t) for t in (str, int, float))
+                params[key] = value
         return await self.client.post_json(f"/storage_service/backup", host=node_ip, params=params)
 
     async def restore(self, node_ip: str, ks: str, cf: str, dest: str, bucket: str, prefix: str, sstables: list[str], scope: str = None) -> str:
@@ -450,6 +464,9 @@ class ScyllaRESTAPIClient():
 
     async def abort_task(self, node_ip: str, task_id: str):
         await self.client.post(f'/task_manager/abort_task/{task_id}', host=node_ip)
+
+    async def get_config(self, node_ip: str, id: str):
+        return await self.client.get_json(f'/v2/config/{id}', host=node_ip)
 
 class ScyllaMetrics:
     def __init__(self, lines: list[str]):

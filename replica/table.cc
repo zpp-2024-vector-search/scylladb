@@ -29,7 +29,7 @@
 #include "cell_locking.hh"
 #include "utils/assert.hh"
 #include "utils/logalloc.hh"
-#include "checked-file-impl.hh"
+#include "utils/checked-file-impl.hh"
 #include "view_info.hh"
 #include "db/data_listeners.hh"
 #include "memtable-sstable.hh"
@@ -53,9 +53,6 @@
 #include "replica/global_table_ptr.hh"
 #include "locator/tablets.hh"
 
-#include <boost/range/algorithm/remove_if.hpp>
-#include <boost/range/algorithm.hpp>
-#include <boost/range/numeric.hpp>
 #include "utils/error_injection.hh"
 #include "readers/reversing_v2.hh"
 #include "readers/empty_v2.hh"
@@ -474,7 +471,7 @@ table::for_all_partitions_slow(schema_ptr s, reader_permit permit, std::function
 }
 
 static bool belongs_to_current_shard(const std::vector<shard_id>& shards) {
-    return boost::find(shards, this_shard_id()) != shards.end();
+    return std::ranges::contains(shards, this_shard_id());
 }
 
 static bool belongs_to_other_shard(const std::vector<shard_id>& shards) {
@@ -1029,8 +1026,10 @@ bool tablet_storage_group_manager::all_storage_groups_split() {
         return true;
     }
 
-    auto split_ready = std::ranges::all_of(_storage_groups | std::views::values,
-        std::mem_fn(&storage_group::set_split_mode));
+    bool split_ready = true;
+    for (const storage_group_ptr& sg : _storage_groups | std::views::values) {
+        split_ready &= sg->set_split_mode();
+    }
 
     // The table replica will say to coordinator that its split status is ready by
     // mirroring the sequence number from tablet metadata into its local state,
@@ -1057,6 +1056,12 @@ sstables::compaction_type_options::split tablet_storage_group_manager::split_com
 
 future<> tablet_storage_group_manager::split_all_storage_groups(tasks::task_info tablet_split_task_info) {
     sstables::compaction_type_options::split opt = split_compaction_options();
+
+    co_await utils::get_local_injector().inject("split_storage_groups_wait", [] (auto& handler) -> future<> {
+        dblog.info("split_storage_groups_wait: waiting");
+        co_await handler.wait_for_message(std::chrono::steady_clock::now() + std::chrono::minutes{5});
+        dblog.info("split_storage_groups_wait: done");
+    }, false);
 
     co_await for_each_storage_group_gently([opt, tablet_split_task_info] (storage_group& storage_group) {
         return storage_group.split(opt, tablet_split_task_info);
@@ -1244,7 +1249,7 @@ const storage_group_map& table::storage_groups() const {
 }
 
 future<> table::safe_foreach_sstable(const sstables::sstable_set& set, noncopyable_function<future<>(const sstables::shared_sstable&)> action) {
-    auto deletion_guard = co_await get_units(_sstable_deletion_sem, 1);
+    auto deletion_guard = co_await get_sstable_list_permit();
 
     co_await set.for_each_sstable_gently([&] (const sstables::shared_sstable& sst) -> future<> {
         return action(sst);
@@ -1730,7 +1735,7 @@ void table::set_metrics() {
                 ms::make_gauge("pending_compaction", ms::description("Estimated number of compactions pending for this column family"), _stats.pending_compactions)(cf)(ks),
                 ms::make_gauge("pending_sstable_deletions",
                         ms::description("Number of tasks waiting to delete sstables from a table"),
-                        [this] { return _sstable_deletion_sem.waiters(); })(cf)(ks)
+                        [this] { return _stats.pending_sstable_deletions; })(cf)(ks)
         });
 
         // Metrics related to row locking
@@ -1847,6 +1852,11 @@ void table::subtract_compaction_group_from_stats(const compaction_group& cg) noe
     _stats.live_sstable_count -= cg.live_sstable_count();
 }
 
+future<table::sstable_list_permit>
+table::get_sstable_list_permit() {
+    co_return sstable_list_permit(co_await seastar::get_units(_sstable_set_mutation_sem, 1));
+}
+
 future<table::sstable_list_builder::result>
 table::sstable_list_builder::build_new_list(const sstables::sstable_set& current_sstables,
                               sstables::sstable_set new_sstable_list,
@@ -1874,11 +1884,10 @@ table::sstable_list_builder::build_new_list(const sstables::sstable_set& current
 }
 
 future<>
-compaction_group::delete_sstables_atomically(std::vector<sstables::shared_sstable> sstables_to_remove) {
+table::delete_sstables_atomically(const sstable_list_permit&, std::vector<sstables::shared_sstable> sstables_to_remove) {
     try {
-        auto gh = _t._sstable_deletion_gate.hold();
-        auto units = co_await get_units(_t._sstable_deletion_sem, 1);
-        co_await _t.get_sstables_manager().delete_atomically(std::move(sstables_to_remove));
+        auto gh = _sstable_deletion_gate.hold();
+        co_await get_sstables_manager().delete_atomically(std::move(sstables_to_remove));
     } catch (...) {
         // There is nothing more we can do here.
         // Any remaining SSTables will eventually be re-compacted and re-deleted.
@@ -1887,14 +1896,18 @@ compaction_group::delete_sstables_atomically(std::vector<sstables::shared_sstabl
 }
 
 future<>
-compaction_group::delete_unused_sstables(sstables::compaction_completion_desc desc) {
+table::sstable_list_builder::delete_sstables_atomically(std::vector<sstables::shared_sstable> sstables_to_remove) {
+    return _t->delete_sstables_atomically(_permit, std::move(sstables_to_remove));
+}
+
+std::vector<sstables::shared_sstable>
+compaction_group::unused_sstables_for_deletion(sstables::compaction_completion_desc desc) const {
     std::unordered_set<sstables::shared_sstable> output(desc.new_sstables.begin(), desc.new_sstables.end());
 
-    auto sstables_to_remove = std::ranges::to<std::vector<sstables::shared_sstable>>(desc.old_sstables
+    return std::ranges::to<std::vector<sstables::shared_sstable>>(desc.old_sstables
             | std::views::filter([&output] (const sstables::shared_sstable& input_sst) {
         return !output.contains(input_sst);
     }));
-    return delete_sstables_atomically(std::move(sstables_to_remove));
 }
 
 std::vector<sstables::shared_sstable> compaction_group::all_sstables() const {
@@ -1910,8 +1923,8 @@ std::vector<sstables::shared_sstable> compaction_group::all_sstables() const {
 future<>
 compaction_group::merge_sstables_from(compaction_group& group) {
     auto& cs = _t.get_compaction_strategy();
-    auto permit = co_await seastar::get_units(_t._sstable_set_mutation_sem, 1);
-    table::sstable_list_builder builder(std::move(permit));
+    auto permit = co_await _t.get_sstable_list_permit();
+    table::sstable_list_builder builder(_t, std::move(permit));
 
     auto sstables_to_merge = group.all_sstables();
     // re-build new list for this group with sstables of the group being merged.
@@ -1962,17 +1975,21 @@ compaction_group::update_sstable_sets_on_compaction_completion(sstables::compact
     // or they could stay forever in the set, resulting in deleted files remaining
     // opened and disk space not being released until shutdown.
     auto undo_compacted_but_not_deleted = defer([&] {
-        auto e = boost::range::remove_if(sstables_compacted_but_not_deleted, [&] (sstables::shared_sstable sst) {
+        std::erase_if(sstables_compacted_but_not_deleted, [&] (sstables::shared_sstable sst) {
             return s.contains(sst);
         });
-        sstables_compacted_but_not_deleted.erase(e, sstables_compacted_but_not_deleted.end());
         _t.rebuild_statistics();
+    });
+
+    _t.get_stats().pending_sstable_deletions++;
+    auto undo_stats = defer([this] {
+        _t.get_stats().pending_sstable_deletions--;
     });
 
     class sstable_list_updater : public row_cache::external_updater_impl {
         table& _t;
         compaction_group& _cg;
-        table::sstable_list_builder _builder;
+        table::sstable_list_builder& _builder;
         const sstables::compaction_completion_desc& _desc;
         struct replacement_desc {
             sstables::compaction_completion_desc desc;
@@ -1981,8 +1998,8 @@ compaction_group::update_sstable_sets_on_compaction_completion(sstables::compact
         };
         std::unordered_map<compaction_group*, replacement_desc> _cg_desc;
     public:
-        explicit sstable_list_updater(compaction_group& cg, table::sstable_list_builder::permit_t permit, sstables::compaction_completion_desc& d)
-            : _t(cg._t), _cg(cg), _builder(std::move(permit)), _desc(d) {}
+        explicit sstable_list_updater(compaction_group& cg, table::sstable_list_builder& builder, sstables::compaction_completion_desc& d)
+            : _t(cg._t), _cg(cg), _builder(builder), _desc(d) {}
         virtual future<> prepare() override {
             // Segregate output sstables according to their owner compaction group.
             // If not in splitting mode, then all output sstables will belong to the same group.
@@ -2023,12 +2040,12 @@ compaction_group::update_sstable_sets_on_compaction_completion(sstables::compact
                 cg->backlog_tracker_adjust_charges(d.main_sstable_set_builder_result.removed_sstables, d.desc.new_sstables);
             }
         }
-        static std::unique_ptr<row_cache::external_updater_impl> make(compaction_group& cg, table::sstable_list_builder::permit_t permit, sstables::compaction_completion_desc& d) {
-            return std::make_unique<sstable_list_updater>(cg, std::move(permit), d);
+        static std::unique_ptr<row_cache::external_updater_impl> make(compaction_group& cg, table::sstable_list_builder& builder, sstables::compaction_completion_desc& d) {
+            return std::make_unique<sstable_list_updater>(cg, builder, d);
         }
     };
-    auto permit = co_await seastar::get_units(_t._sstable_set_mutation_sem, 1);
-    auto updater = row_cache::external_updater(sstable_list_updater::make(*this, std::move(permit), desc));
+    table::sstable_list_builder builder(_t, co_await _t.get_sstable_list_permit());
+    auto updater = row_cache::external_updater(sstable_list_updater::make(*this, builder, desc));
     auto& cache = _t.get_row_cache();
 
     co_await cache.invalidate(std::move(updater), std::move(desc.ranges_for_cache_invalidation));
@@ -2039,7 +2056,7 @@ compaction_group::update_sstable_sets_on_compaction_completion(sstables::compact
 
     _t.rebuild_statistics();
 
-    co_await delete_unused_sstables(std::move(desc));
+    co_await builder.delete_sstables_atomically(unused_sstables_for_deletion(std::move(desc)));
 }
 
 future<>
@@ -2902,7 +2919,7 @@ future<> table::snapshot_on_all_shards(sharded<database>& sharded_db, const glob
 future<table::snapshot_file_set> table::take_snapshot(sstring jsondir) {
     tlogger.trace("take_snapshot {}", jsondir);
 
-    auto sstable_deletion_guard = co_await get_units(_sstable_deletion_sem, 1);
+    auto sstable_deletion_guard = co_await get_sstable_list_permit();
 
     auto tables = *_sstables->all() | std::ranges::to<std::vector<sstables::shared_sstable>>();
     auto table_names = std::make_unique<std::unordered_set<sstring>>();
@@ -3130,6 +3147,13 @@ future<db::replay_position> table::discard_sstables(db_clock::time_point truncat
     };
     std::vector<removed_sstable> remove;
 
+    _stats.pending_sstable_deletions++;
+    auto undo_stats = defer([this] {
+        _stats.pending_sstable_deletions--;
+    });
+
+    auto permit = co_await get_sstable_list_permit();
+
     co_await _cache.invalidate(row_cache::external_updater([this, &rp, &remove, truncated_at] {
         // FIXME: the following isn't exception safe.
         for_each_compaction_group([&] (compaction_group& cg) {
@@ -3172,7 +3196,7 @@ future<db::replay_position> table::discard_sstables(db_clock::time_point truncat
         erase_sstable_cleanup_state(r.sst);
         del.emplace_back(r.sst);
     };
-    co_await get_sstables_manager().delete_atomically(std::move(del));
+    co_await delete_sstables_atomically(permit, std::move(del));
     co_return rp;
 }
 
@@ -3715,14 +3739,14 @@ table::make_reader_v2_excluding_staging(schema_ptr s,
 }
 
 future<> table::move_sstables_from_staging(std::vector<sstables::shared_sstable> sstables) {
-    auto units = co_await get_units(_sstable_deletion_sem, 1);
+    auto permit = co_await get_sstable_list_permit();
     sstables::delayed_commit_changes delay_commit;
     std::unordered_set<compaction_group*> compaction_groups_to_notify;
     for (auto sst : sstables) {
         try {
             // Off-strategy can happen in parallel to view building, so the SSTable may be deleted already if the former
             // completed first.
-            // The _sstable_deletion_sem prevents list update on off-strategy completion and move_sstables_from_staging()
+            // The sstable list permit prevents list update on off-strategy completion and move_sstables_from_staging()
             // from stepping on each other's toe.
             co_await sst->change_state(sstables::sstable_state::normal, &delay_commit);
             auto& cg = compaction_group_for_sstable(sst);
@@ -3962,17 +3986,16 @@ future<> compaction_group::cleanup() {
         virtual future<> prepare() override {
             // Capture SSTables after flush, and with compaction disabled, to avoid missing any.
             auto set = _cg.make_sstable_set();
-            std::vector<sstables::shared_sstable> all_sstables;
-            all_sstables.reserve(set->size());
-            set->for_each_sstable([&all_sstables] (const sstables::shared_sstable& sst) mutable {
-                all_sstables.push_back(sst);
+            auto& sstables_compacted_but_not_deleted = _cg._sstables_compacted_but_not_deleted;
+            sstables_compacted_but_not_deleted.reserve(set->size() + sstables_compacted_but_not_deleted.size());
+            set->for_each_sstable([&] (const sstables::shared_sstable& sst) mutable {
+                sstables_compacted_but_not_deleted.push_back(sst);
             });
             if (utils::get_local_injector().enter("tablet_cleanup_failure")) {
                 co_await sleep(std::chrono::seconds(1));
                 tlogger.info("Cleanup failed for tablet {}", _cg.group_id());
                 throw std::runtime_error("tablet cleanup failure");
             }
-            co_await _cg.delete_sstables_atomically(std::move(all_sstables));
         }
 
         virtual void execute() override {
@@ -3983,13 +4006,25 @@ future<> compaction_group::cleanup() {
         }
     };
 
+    auto permit = co_await _t.get_sstable_list_permit();
     auto updater = row_cache::external_updater(std::make_unique<compaction_group_cleaner>(*this));
 
     auto p_range = to_partition_range(token_range());
     tlogger.debug("Invalidating range {} for compaction group {} of table {} during cleanup.",
                   p_range, group_id(), _t.schema()->ks_name(), _t.schema()->cf_name());
+    // Since permit is still held, all actions below will be executed atomically:
     co_await _t._cache.invalidate(std::move(updater), p_range);
     _t._cache.refresh_snapshot();
+
+    co_await _t.delete_sstables_atomically(permit, _sstables_compacted_but_not_deleted);
+    // Clearing sstables_compacted_but_not_deleted only on success allows a retry caused
+    // by a failure during deletion to still find the sstables, despite they were removed
+    // from the sstable sets.
+    _sstables_compacted_but_not_deleted.clear();
+    if (utils::get_local_injector().enter("tablet_cleanup_failure_post_deletion")) {
+        tlogger.info("Cleanup failed for tablet {}", group_id());
+        throw std::runtime_error("tablet cleanup failure");
+    }
 }
 
 future<> table::clear_inactive_reads_for_tablet(database& db, storage_group& sg) {

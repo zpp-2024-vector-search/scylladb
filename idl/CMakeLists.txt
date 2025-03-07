@@ -51,6 +51,7 @@ set(idl_headers
   raft_storage.idl.hh
   group0.idl.hh
   hinted_handoff.idl.hh
+  sstables.idl.hh
   storage_proxy.idl.hh
   storage_service.idl.hh
   group0_state_machine.idl.hh
@@ -64,6 +65,7 @@ set(idl_headers
   gossip.idl.hh
   migration_manager.idl.hh
   node_ops.idl.hh
+  tasks.idl.hh
   )
 
 foreach(idl_header ${idl_headers})

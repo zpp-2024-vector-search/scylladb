@@ -162,17 +162,22 @@ struct tablet_task_info {
     db_clock::time_point request_time;
     int64_t sched_nr = 0;
     db_clock::time_point sched_time;
-    sstring repair_hosts_filter;
-    sstring repair_dcs_filter;
+    std::unordered_set<locator::host_id> repair_hosts_filter;
+    std::unordered_set<sstring> repair_dcs_filter;
     bool operator==(const tablet_task_info&) const = default;
     bool is_valid() const;
     bool is_user_repair_request() const;
-    static tablet_task_info make_user_repair_request();
-    static tablet_task_info make_auto_repair_request();
+    bool selected_by_filters(const tablet_replica& replica, const topology& topo) const;
+    static tablet_task_info make_user_repair_request(std::unordered_set<locator::host_id> hosts_filter = {}, std::unordered_set<sstring> dcs_filter = {});
+    static tablet_task_info make_auto_repair_request(std::unordered_set<locator::host_id> hosts_filter = {}, std::unordered_set<sstring> dcs_filter = {});
     static tablet_task_info make_migration_request();
     static tablet_task_info make_intranode_migration_request();
     static tablet_task_info make_split_request();
     static tablet_task_info make_merge_request();
+    static sstring serialize_repair_hosts_filter(std::unordered_set<locator::host_id> filter);
+    static sstring serialize_repair_dcs_filter(std::unordered_set<sstring> filter);
+    static std::unordered_set<locator::host_id> deserialize_repair_hosts_filter(sstring filter);
+    static std::unordered_set<sstring> deserialize_repair_dcs_filter(sstring filter);
 };
 
 /// Stores information about a single tablet.
@@ -312,13 +317,21 @@ enum tablet_range_side {
 // The decision of whether tablets of a given should be split, merged, or none, is made
 // by the load balancer. This decision is recorded in the tablet_map and stored in group0.
 struct resize_decision {
-    struct none {};
-    struct split {};
-    struct merge {};
+    struct none {
+        auto operator<=>(const none&) const = default;
+    };
+    struct split {
+        auto operator<=>(const split&) const = default;
+    };
+    struct merge {
+        auto operator<=>(const merge&) const = default;
+    };
+    using way_type = std::variant<none, split, merge>;
 
     using seq_number_t = int64_t;
 
-    std::variant<none, split, merge> way;
+    way_type way;
+
     // The sequence number globally identifies a resize decision.
     // It's monotonically increasing, globally.
     // Needed to distinguish stale decision from latest one, in case coordinator
@@ -327,15 +340,24 @@ struct resize_decision {
 
     resize_decision() = default;
     resize_decision(sstring decision, uint64_t seq_number);
+    bool is_none() const {
+        return std::holds_alternative<resize_decision::none>(way);
+    }
     bool split_or_merge() const {
-        return !std::holds_alternative<resize_decision::none>(way);
+        return !is_none();
+    }
+    bool is_split() const {
+        return std::holds_alternative<resize_decision::split>(way);
+    }
+    bool is_merge() const {
+        return std::holds_alternative<resize_decision::merge>(way);
     }
     bool operator==(const resize_decision&) const;
     sstring type_name() const;
     seq_number_t next_sequence_number() const;
-    // Returns true if this is the initial decision, before split or merge was emitted.
-    bool initial_decision() const;
 };
+
+using resize_decision_way = resize_decision::way_type;
 
 struct table_load_stats {
     uint64_t size_in_bytes = 0;
@@ -373,6 +395,11 @@ struct tablet_desc {
     tablet_id tid;
     const tablet_info* info; // cannot be null.
     const tablet_transition_info* transition; // null if there's no transition.
+};
+
+class no_such_tablet_map : public std::runtime_error {
+public:
+    no_such_tablet_map(const table_id& id);
 };
 
 /// Stores information about tablets of a single table.
@@ -447,6 +474,9 @@ public:
     /// Returns the primary replica for the tablet
     tablet_replica get_primary_replica(tablet_id id) const;
     tablet_replica get_primary_replica_within_dc(tablet_id id, const topology& topo, sstring dc) const;
+
+    // Returns the replica that matches hosts and dcs filters for tablet_task_info.
+    std::optional<tablet_replica> maybe_get_selected_replica(tablet_id id, const topology& topo, const tablet_task_info& tablet_task_info) const;
 
     /// Returns a vector of sorted last tokens for tablets.
     future<std::vector<token>> get_sorted_tokens() const;
@@ -650,6 +680,11 @@ struct tablet_metadata_change_hint {
 };
 
 }
+
+template <>
+struct fmt::formatter<locator::resize_decision_way> : fmt::formatter<string_view> {
+    auto format(const locator::resize_decision_way&, fmt::format_context& ctx) const -> decltype(ctx.out());
+};
 
 template <>
 struct fmt::formatter<locator::tablet_transition_stage> : fmt::formatter<string_view> {

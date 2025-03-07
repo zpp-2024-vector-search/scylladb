@@ -469,7 +469,7 @@ SEASTAR_TEST_CASE(reader_restriction_file_tracking) {
         }
 
         // All units should have been deposited back.
-        REQUIRE_EVENTUALLY_EQUAL(4 * 1024, semaphore.available_resources().memory);
+        REQUIRE_EVENTUALLY_EQUAL<ssize_t>([&] { return semaphore.available_resources().memory; }, 4 * 1024);
     });
 }
 
@@ -513,7 +513,7 @@ SEASTAR_TEST_CASE(reader_concurrency_semaphore_timeout) {
        }
 
         // All units should have been deposited back.
-        REQUIRE_EVENTUALLY_EQUAL(replica::new_reader_base_cost, semaphore.available_resources().memory);
+        REQUIRE_EVENTUALLY_EQUAL<ssize_t>([&] { return semaphore.available_resources().memory; }, replica::new_reader_base_cost);
     });
 }
 
@@ -545,7 +545,7 @@ SEASTAR_TEST_CASE(reader_concurrency_semaphore_max_queue_length) {
             }
         }
 
-        REQUIRE_EVENTUALLY_EQUAL(replica::new_reader_base_cost, semaphore.available_resources().memory);
+        REQUIRE_EVENTUALLY_EQUAL<ssize_t>([&] { return semaphore.available_resources().memory; }, replica::new_reader_base_cost);
     });
 }
 
@@ -735,7 +735,7 @@ SEASTAR_THREAD_TEST_CASE(test_reader_concurrency_semaphore_admission) {
 
     // resources and waitlist
     {
-        reader_permit_opt permit = semaphore.obtain_permit(schema, get_name(), 1024, db::timeout_clock::now(), {}).get();
+        reader_permit_opt permit = semaphore.obtain_permit(schema, get_name(), 1024, db::no_timeout, {}).get();
 
         require_can_admit(true, "enough resources");
 
@@ -763,7 +763,7 @@ SEASTAR_THREAD_TEST_CASE(test_reader_concurrency_semaphore_admission) {
 
     // need_cpu and awaits
     {
-        auto permit = semaphore.obtain_permit(schema, get_name(), 1024, db::timeout_clock::now(), {}).get();
+        auto permit = semaphore.obtain_permit(schema, get_name(), 1024, db::no_timeout, {}).get();
 
         require_can_admit(true, "!need_cpu");
         {
@@ -792,7 +792,7 @@ SEASTAR_THREAD_TEST_CASE(test_reader_concurrency_semaphore_admission) {
 
     // forward progress -- readmission
     {
-        auto permit = semaphore.obtain_permit(schema, get_name(), 1024, db::timeout_clock::now(), {}).get();
+        auto permit = semaphore.obtain_permit(schema, get_name(), 1024, db::no_timeout, {}).get();
 
         auto irh = semaphore.register_inactive_read(make_empty_flat_reader_v2(s.schema(), permit));
         BOOST_REQUIRE(semaphore.try_evict_one_inactive_read());
@@ -886,7 +886,7 @@ SEASTAR_THREAD_TEST_CASE(test_reader_concurrency_semaphore_admission) {
     {
         check_admitting_enqueued_read(
             [&] {
-                return reader_permit_opt(semaphore.obtain_permit(schema, get_name(), 2 * 1024, db::timeout_clock::now(), {}).get());
+                return reader_permit_opt(semaphore.obtain_permit(schema, get_name(), 2 * 1024, db::no_timeout, {}).get());
             },
             [] (reader_permit_opt& permit1) {
                 permit1 = {};
@@ -901,7 +901,7 @@ SEASTAR_THREAD_TEST_CASE(test_reader_concurrency_semaphore_admission) {
     {
         check_admitting_enqueued_read(
             [&] {
-                return reader_permit_opt(semaphore.obtain_permit(schema, get_name(), 2 * 1024, db::timeout_clock::now(), {}).get());
+                return reader_permit_opt(semaphore.obtain_permit(schema, get_name(), 2 * 1024, db::no_timeout, {}).get());
             },
             [&] (reader_permit_opt& permit1) {
                 return semaphore.register_inactive_read(make_empty_flat_reader_v2(s.schema(), *permit1));
@@ -915,7 +915,7 @@ SEASTAR_THREAD_TEST_CASE(test_reader_concurrency_semaphore_admission) {
     {
         check_admitting_enqueued_read(
             [&] {
-                auto permit = semaphore.obtain_permit(schema, get_name(), 1024, db::timeout_clock::now(), {}).get();
+                auto permit = semaphore.obtain_permit(schema, get_name(), 1024, db::no_timeout, {}).get();
                 require_can_admit(true, "enough resources");
                 return std::pair(permit, std::optional<reader_permit::need_cpu_guard>{permit});
             }, [&] (std::pair<reader_permit, std::optional<reader_permit::need_cpu_guard>>& permit_and_need_cpu_guard) {
@@ -931,7 +931,7 @@ SEASTAR_THREAD_TEST_CASE(test_reader_concurrency_semaphore_admission) {
     {
         check_admitting_enqueued_read(
             [&] {
-                auto permit = semaphore.obtain_permit(schema, get_name(), 1024, db::timeout_clock::now(), {}).get();
+                auto permit = semaphore.obtain_permit(schema, get_name(), 1024, db::no_timeout, {}).get();
                 require_can_admit(true, "enough resources");
                 return std::pair(permit, reader_permit::need_cpu_guard{permit});
             }, [&] (std::pair<reader_permit, reader_permit::need_cpu_guard>& permit_and_need_cpu_guard) {
@@ -1167,7 +1167,7 @@ SEASTAR_THREAD_TEST_CASE(test_reader_concurrency_semaphore_evict_inactive_reads_
 
     // Marking p2 as awaits should eventually allow p3 to be admitted by evicting p1
     rd2.mark_as_awaits();
-    REQUIRE_EVENTUALLY_EQUAL(semaphore.get_stats().waiters, 0);
+    REQUIRE_EVENTUALLY_EQUAL<uint64_t>([&] { return semaphore.get_stats().waiters; }, 0);
     BOOST_REQUIRE_EQUAL(semaphore.get_stats().need_cpu_permits, 1);
     BOOST_REQUIRE_EQUAL(semaphore.get_stats().awaits_permits, 1);
     BOOST_REQUIRE_EQUAL(semaphore.get_stats().inactive_reads, 0);
@@ -1212,7 +1212,7 @@ SEASTAR_THREAD_TEST_CASE(test_reader_concurrency_semaphore_set_resources) {
     BOOST_REQUIRE_EQUAL(semaphore.get_stats().waiters, 1);
 
     semaphore.set_resources({4, 4 * 1024});
-    REQUIRE_EVENTUALLY_EQUAL(semaphore.get_stats().waiters, 0);
+    REQUIRE_EVENTUALLY_EQUAL<uint64_t>([&] { return semaphore.get_stats().waiters; }, 0);
     BOOST_REQUIRE_EQUAL(semaphore.available_resources(), reader_resources(1, 1024));
     BOOST_REQUIRE_EQUAL(semaphore.initial_resources(), reader_resources(4, 4 * 1024));
     permit3_fut.get();
@@ -2101,7 +2101,7 @@ SEASTAR_THREAD_TEST_CASE(test_reader_concurrency_semaphore_necessary_evicting) {
         BOOST_REQUIRE_EQUAL(semaphore.get_stats().inactive_reads, 1);
 
         ncpu_guard.reset();
-        REQUIRE_EVENTUALLY_EQUAL(bool(handle), false);
+        REQUIRE_EVENTUALLY_EQUAL<bool>([&] { return bool(handle); }, false);
         BOOST_REQUIRE_EQUAL(semaphore.get_stats().inactive_reads, 0);
         BOOST_REQUIRE_EQUAL(semaphore.get_stats().permit_based_evictions, ++evicted_reads);
 
@@ -2130,7 +2130,7 @@ SEASTAR_THREAD_TEST_CASE(test_reader_concurrency_semaphore_necessary_evicting) {
         BOOST_REQUIRE_EQUAL(semaphore.get_stats().inactive_reads, 1);
 
         ncpu_guard.reset();
-        REQUIRE_EVENTUALLY_EQUAL(bool(handle), false);
+        REQUIRE_EVENTUALLY_EQUAL<bool>([&] { return bool(handle); }, false);
         BOOST_REQUIRE_EQUAL(semaphore.get_stats().inactive_reads, 0);
         BOOST_REQUIRE_EQUAL(semaphore.get_stats().permit_based_evictions, ++evicted_reads);
 
@@ -2230,7 +2230,7 @@ SEASTAR_THREAD_TEST_CASE(test_reader_concurrency_semaphore_live_update_cpu_concu
         ::require_can_admit(schema, semaphore, expected_can_admit, description, sl);
     };
 
-    auto permit1 = semaphore.obtain_permit(schema, get_name(), 1024, db::timeout_clock::now(), {}).get();
+    auto permit1 = semaphore.obtain_permit(schema, get_name(), 1024, db::no_timeout, {}).get();
 
     require_can_admit(true, "!need_cpu");
     {
@@ -2238,7 +2238,7 @@ SEASTAR_THREAD_TEST_CASE(test_reader_concurrency_semaphore_live_update_cpu_concu
 
         require_can_admit(true, "need_cpu < cpu_concurrency");
 
-        auto permit2 = semaphore.obtain_permit(schema, get_name(), 1024, db::timeout_clock::now(), {}).get();
+        auto permit2 = semaphore.obtain_permit(schema, get_name(), 1024, db::no_timeout, {}).get();
 
         // no change
         require_can_admit(true, "need_cpu < cpu_concurrency");
@@ -2257,6 +2257,120 @@ SEASTAR_THREAD_TEST_CASE(test_reader_concurrency_semaphore_live_update_cpu_concu
         require_can_admit(true, "need_cpu < cpu_concurrency");
     }
     require_can_admit(true, "!need_cpu");
+}
+
+/// Check that permits are cleaned up properly if they step on queue overload.
+SEASTAR_THREAD_TEST_CASE(test_reader_concurrency_semaphore_wait_queue_overload_cleanup) {
+    simple_schema s;
+    const auto schema = s.schema();
+
+    const std::string test_name = get_name();
+
+    reader_concurrency_semaphore semaphore(
+            utils::updateable_value<int>(1),
+            1024,
+            test_name + " semaphore",
+            1,
+            utils::updateable_value<uint32_t>(2),
+            utils::updateable_value<uint32_t>(4),
+            utils::updateable_value<uint32_t>(1),
+            reader_concurrency_semaphore::register_metrics::no);
+    auto stop_sem = deferred_stop(semaphore);
+
+    reader_permit_opt permit1 = semaphore.obtain_permit(schema, test_name, 1024, db::no_timeout, {}).get();
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().reads_admitted, 1);
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().reads_admitted_immediately, 1);
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().waiters, 0);
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().total_reads_shed_due_to_overload, 0);
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().current_permits, 1);
+
+    auto permit2_fut = semaphore.obtain_permit(schema, test_name, 1024, db::no_timeout, {});
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().reads_admitted, 1);
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().reads_admitted_immediately, 1);
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().waiters, 1);
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().total_reads_shed_due_to_overload, 0);
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().current_permits, 2);
+
+    {
+        reader_permit_opt permit_holder;
+        auto permit3_fut = semaphore.with_permit(schema, test_name.c_str(), 1024, db::no_timeout, {}, permit_holder, [] (reader_permit) {
+            BOOST_FAIL("unexpected call to with permit lambda");
+            return make_ready_future<>();
+        });
+        BOOST_REQUIRE(permit3_fut.failed());
+        BOOST_CHECK_THROW(permit3_fut.get(), std::runtime_error);
+    }
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().reads_admitted, 1);
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().reads_admitted_immediately, 1);
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().waiters, 1);
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().total_reads_shed_due_to_overload, 1);
+    // This is the critical check in this test: we check that the permit3 was
+    // destroyed and it has not become a zombie permit due to incomplete cleanup.
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().current_permits, 2);
+
+    permit1 = {};
+    permit2_fut.get();
+}
+
+// Check that attempting to abort an already aborted permit is handled correctly.
+SEASTAR_THREAD_TEST_CASE(test_reader_concurrency_semaphore_double_permit_abort) {
+    simple_schema s;
+    const auto schema = s.schema();
+
+    const std::string test_name = get_name();
+
+    reader_concurrency_semaphore semaphore(
+            utils::updateable_value<int>(2),
+            2048,
+            test_name + " semaphore",
+            std::numeric_limits<size_t>::max(),
+            utils::updateable_value<uint32_t>(2),
+            utils::updateable_value<uint32_t>(400),
+            utils::updateable_value<uint32_t>(2),
+            reader_concurrency_semaphore::register_metrics::no);
+    auto stop_sem = deferred_stop(semaphore);
+
+    reader_permit_opt permit1 = semaphore.obtain_permit(schema, test_name, 1024, db::no_timeout, {}).get();
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().reads_admitted, 1);
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().reads_admitted_immediately, 1);
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().waiters, 0);
+
+    reader_permit_opt permit2 = semaphore.obtain_permit(schema, test_name, 1024, db::no_timeout, {}).get();
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().reads_admitted, 2);
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().reads_admitted_immediately, 2);
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().waiters, 0);
+
+    // Exhaust all memory until serialize-limit triggers and make sure permit1 is
+    // the blessed one.
+    auto res1 = permit1->consume_memory(2048);
+    auto requested_memory1_fut = permit1->request_memory(1024);
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().reads_enqueued_for_memory, 0);
+    auto requested_memory1 = requested_memory1_fut.get();
+
+    // Requesting memory for permit2 will queue the permit for memory.
+    auto requested_memory2_fut = permit2->request_memory(1024);
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().reads_enqueued_for_memory, 1);
+
+    // Set timeout to 0 and wait for permit to time out.
+    permit2->set_timeout(db::timeout_clock::now());
+    eventually_true([&] {
+        try {
+            permit2->check_abort();
+            return false;
+        } catch (named_semaphore_timed_out&) {
+            return true;
+        } catch (...) {
+            BOOST_FAIL(format("unexpected exception while waiting for permit to time out: {}", std::current_exception()));
+            return true;
+        }
+    });
+
+    // Attempting to register a read which is queued on memory as inactive, will
+    // trigger an attempt to abort the read.
+    // This is where the double-abort happens.
+    auto irh = semaphore.register_inactive_read(make_empty_flat_reader_v2(s.schema(), *permit2));
+
+    BOOST_REQUIRE_THROW(requested_memory2_fut.get(), named_semaphore_timed_out);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

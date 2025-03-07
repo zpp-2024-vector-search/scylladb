@@ -490,6 +490,7 @@ scylla_tests = set([
     'test/boost/exceptions_fallback_test',
     'test/boost/exceptions_optimized_test',
     'test/boost/expr_test',
+    'test/boost/file_stream_test',
     'test/boost/flush_queue_test',
     'test/boost/fragmented_temporary_buffer_test',
     'test/boost/frozen_mutation_test',
@@ -794,7 +795,6 @@ scylla_core = (['message/messaging_service.cc',
                 'frozen_schema.cc',
                 'bytes.cc',
                 'timeout_config.cc',
-                'row_cache.cc',
                 'schema_mutations.cc',
                 'generic_server.cc',
                 'utils/alien_worker.cc',
@@ -815,6 +815,7 @@ scylla_core = (['message/messaging_service.cc',
                 'utils/on_internal_error.cc',
                 'utils/pretty_printers.cc',
                 'utils/stream_compressor.cc',
+                'utils/labels.cc',
                 'converting_mutation_partition_applier.cc',
                 'readers/combined.cc',
                 'readers/multishard.cc',
@@ -974,43 +975,45 @@ scylla_core = (['message/messaging_service.cc',
                 'cql3/restrictions/statement_restrictions.cc',
                 'cql3/result_set.cc',
                 'cql3/prepare_context.cc',
-                'db/consistency_level.cc',
-                'db/system_keyspace.cc',
-                'db/virtual_table.cc',
-                'db/virtual_tables.cc',
-                'db/system_distributed_keyspace.cc',
-                'db/size_estimates_virtual_reader.cc',
-                'db/schema_applier.cc',
-                'db/schema_tables.cc',
-                'db/cql_type_parser.cc',
-                'db/legacy_schema_migrator.cc',
+                'db/batchlog_manager.cc',
                 'db/commitlog/commitlog.cc',
-                'db/commitlog/commitlog_replayer.cc',
                 'db/commitlog/commitlog_entry.cc',
+                'db/commitlog/commitlog_replayer.cc',
+                'db/config.cc',
+                'db/consistency_level.cc',
+                'db/cql_type_parser.cc',
                 'db/data_listeners.cc',
+                'db/extensions.cc',
                 'db/functions/function.cc',
+                'db/heat_load_balance.cc',
+                'db/hints/host_filter.cc',
                 'db/hints/internal/hint_endpoint_manager.cc',
                 'db/hints/internal/hint_sender.cc',
                 'db/hints/internal/hint_storage.cc',
                 'db/hints/manager.cc',
                 'db/hints/resource_manager.cc',
-                'db/hints/host_filter.cc',
                 'db/hints/sync_point.cc',
-                'db/config.cc',
-                'db/extensions.cc',
-                'db/heat_load_balance.cc',
                 'db/large_data_handler.cc',
+                'db/legacy_schema_migrator.cc',
                 'db/marshal/type_parser.cc',
-                'db/batchlog_manager.cc',
+                'db/per_partition_rate_limit_options.cc',
+                'db/rate_limiter.cc',
+                'db/row_cache.cc',
+                'db/schema_applier.cc',
+                'db/schema_tables.cc',
+                'db/size_estimates_virtual_reader.cc',
+                'db/snapshot-ctl.cc',
+                'db/snapshot/backup_task.cc',
+                'db/sstables-format-selector.cc',
+                'db/system_distributed_keyspace.cc',
+                'db/system_keyspace.cc',
                 'db/tags/utils.cc',
+                'db/view/row_locking.cc',
                 'db/view/view.cc',
                 'db/view/view_update_generator.cc',
-                'db/view/row_locking.cc',
-                'db/sstables-format-selector.cc',
-                'db/snapshot-ctl.cc',
-                'db/rate_limiter.cc',
-                'db/per_partition_rate_limit_options.cc',
-                'db/snapshot/backup_task.cc',
+                'db/virtual_table.cc',
+                'db/virtual_tables.cc',
+                'db/tablet_options.cc',
                 'index/secondary_index_manager.cc',
                 'index/secondary_index.cc',
                 'utils/UUID_gen.cc',
@@ -1029,6 +1032,11 @@ scylla_core = (['message/messaging_service.cc',
                 'utils/s3/aws_error.cc',
                 'utils/s3/client.cc',
                 'utils/s3/retry_strategy.cc',
+                'utils/s3/credentials_providers/aws_credentials_provider.cc',
+                'utils/s3/credentials_providers/environment_aws_credentials_provider.cc',
+                'utils/s3/credentials_providers/instance_profile_credentials_provider.cc',
+                'utils/s3/credentials_providers/sts_assume_role_credentials_provider.cc',
+                'utils/s3/credentials_providers/aws_credentials_provider_chain.cc',
                 'utils/advanced_rpc_compressor.cc',
                 'gms/version_generator.cc',
                 'gms/versioned_value.cc',
@@ -1082,6 +1090,7 @@ scylla_core = (['message/messaging_service.cc',
                 'streaming/stream_request.cc',
                 'streaming/stream_summary.cc',
                 'streaming/stream_transfer_task.cc',
+                'streaming/stream_blob.cc',
                 'streaming/stream_receive_task.cc',
                 'streaming/stream_plan.cc',
                 'streaming/progress_info.cc',
@@ -1313,6 +1322,7 @@ idls = ['idl/gossip_digest.idl.hh',
         'idl/group0.idl.hh',
         'idl/hinted_handoff.idl.hh',
         'idl/storage_proxy.idl.hh',
+        'idl/sstables.idl.hh',
         'idl/group0_state_machine.idl.hh',
         'idl/mapreduce_request.idl.hh',
         'idl/replica_exception.idl.hh',
@@ -1325,7 +1335,7 @@ idls = ['idl/gossip_digest.idl.hh',
         'idl/gossip.idl.hh',
         'idl/migration_manager.idl.hh',
         "idl/node_ops.idl.hh",
-
+        "idl/tasks.idl.hh"
         ]
 
 scylla_tests_generic_dependencies = [
@@ -1335,12 +1345,14 @@ scylla_tests_generic_dependencies = [
     'test/lib/test_utils.cc',
     'test/lib/tmpdir.cc',
     'test/lib/sstable_run_based_compaction_strategy_for_tests.cc',
+    'test/lib/eventually.cc',
 ]
 
 scylla_tests_dependencies = scylla_core + alternator + idls + scylla_tests_generic_dependencies + [
     'test/lib/cql_assertions.cc',
     'test/lib/result_set_assertions.cc',
     'test/lib/mutation_source_test.cc',
+    'test/lib/mutation_assertions.cc',
     'test/lib/sstable_utils.cc',
     'test/lib/data_model.cc',
     'test/lib/exception_utils.cc',
@@ -1376,6 +1388,7 @@ scylla_perfs = ['test/perf/perf_alternator.cc',
                 'test/lib/key_utils.cc',
                 'test/lib/random_schema.cc',
                 'test/lib/data_model.cc',
+                'test/lib/eventually.cc',
                 'seastar/tests/perf/linux_perf_event.cc']
 
 deps = {
@@ -1537,13 +1550,14 @@ deps['test/boost/bytes_ostream_test'] = [
     "bytes.cc",
     "utils/managed_bytes.cc",
     "utils/logalloc.cc",
+    "utils/labels.cc",
     "utils/dynamic_bitset.cc",
     "test/lib/log.cc",
 ]
 deps['test/boost/input_stream_test'] = ['test/boost/input_stream_test.cc']
 deps['test/boost/UUID_test'] = ['clocks-impl.cc', 'utils/UUID_gen.cc', 'test/boost/UUID_test.cc', 'utils/uuid.cc', 'utils/dynamic_bitset.cc', 'utils/hashers.cc', 'utils/on_internal_error.cc']
 deps['test/boost/murmur_hash_test'] = ['bytes.cc', 'utils/murmur_hash.cc', 'test/boost/murmur_hash_test.cc']
-deps['test/boost/allocation_strategy_test'] = ['test/boost/allocation_strategy_test.cc', 'utils/logalloc.cc', 'utils/dynamic_bitset.cc']
+deps['test/boost/allocation_strategy_test'] = ['test/boost/allocation_strategy_test.cc', 'utils/logalloc.cc', 'utils/dynamic_bitset.cc', 'utils/labels.cc']
 deps['test/boost/log_heap_test'] = ['test/boost/log_heap_test.cc']
 deps['test/boost/estimated_histogram_test'] = ['test/boost/estimated_histogram_test.cc']
 deps['test/boost/summary_test'] = ['test/boost/summary_test.cc']
@@ -1561,7 +1575,7 @@ deps['test/boost/linearizing_input_stream_test'] = [
     "test/boost/linearizing_input_stream_test.cc",
     "test/lib/log.cc",
 ]
-deps['test/boost/expr_test'] = ['test/boost/expr_test.cc', 'test/lib/expr_test_utils.cc'] + scylla_core
+deps['test/boost/expr_test'] = ['test/boost/expr_test.cc', 'test/lib/expr_test_utils.cc'] + scylla_core + alternator
 deps['test/boost/rate_limiter_test'] = ['test/boost/rate_limiter_test.cc', 'db/rate_limiter.cc']
 deps['test/boost/exceptions_optimized_test'] = ['test/boost/exceptions_optimized_test.cc', 'utils/exceptions.cc']
 deps['test/boost/exceptions_fallback_test'] = ['test/boost/exceptions_fallback_test.cc', 'utils/exceptions.cc']
@@ -1570,16 +1584,16 @@ deps['test/boost/duration_test'] += ['test/lib/exception_utils.cc']
 deps['test/boost/schema_loader_test'] += ['tools/schema_loader.cc', 'tools/read_mutation.cc']
 deps['test/boost/rust_test'] += ['rust/inc/src/lib.rs']
 
-deps['test/raft/replication_test'] = ['test/raft/replication_test.cc', 'test/raft/replication.cc', 'test/raft/helpers.cc'] + scylla_raft_dependencies
-deps['test/raft/raft_server_test'] = ['test/raft/raft_server_test.cc', 'test/raft/replication.cc', 'test/raft/helpers.cc'] + scylla_raft_dependencies
+deps['test/raft/replication_test'] = ['test/raft/replication_test.cc', 'test/raft/replication.cc', 'test/raft/helpers.cc', 'test/lib/eventually.cc'] + scylla_raft_dependencies
+deps['test/raft/raft_server_test'] = ['test/raft/raft_server_test.cc', 'test/raft/replication.cc', 'test/raft/helpers.cc', 'test/lib/eventually.cc'] + scylla_raft_dependencies
 deps['test/raft/randomized_nemesis_test'] = ['test/raft/randomized_nemesis_test.cc', 'direct_failure_detector/failure_detector.cc', 'test/raft/helpers.cc'] + scylla_raft_dependencies
 deps['test/raft/failure_detector_test'] = ['test/raft/failure_detector_test.cc', 'direct_failure_detector/failure_detector.cc', 'test/raft/helpers.cc'] + scylla_raft_dependencies
-deps['test/raft/many_test'] = ['test/raft/many_test.cc', 'test/raft/replication.cc', 'test/raft/helpers.cc'] + scylla_raft_dependencies
+deps['test/raft/many_test'] = ['test/raft/many_test.cc', 'test/raft/replication.cc', 'test/raft/helpers.cc', 'test/lib/eventually.cc'] + scylla_raft_dependencies
 deps['test/raft/fsm_test'] =  ['test/raft/fsm_test.cc', 'test/raft/helpers.cc', 'test/lib/log.cc'] + scylla_raft_dependencies
 deps['test/raft/etcd_test'] =  ['test/raft/etcd_test.cc', 'test/raft/helpers.cc', 'test/lib/log.cc'] + scylla_raft_dependencies
 deps['test/raft/raft_sys_table_storage_test'] = ['test/raft/raft_sys_table_storage_test.cc'] + \
-    scylla_core + scylla_tests_generic_dependencies
-deps['test/boost/address_map_test'] = ['test/boost/address_map_test.cc'] + scylla_core
+    scylla_core + alternator + scylla_tests_generic_dependencies
+deps['test/boost/address_map_test'] = ['test/boost/address_map_test.cc'] + scylla_core + alternator
 deps['test/raft/discovery_test'] =  ['test/raft/discovery_test.cc',
                                      'test/raft/helpers.cc',
                                      'test/lib/log.cc',
@@ -1652,7 +1666,14 @@ defines = ' '.join(['-D' + d for d in defines])
 globals().update(vars(args))
 
 total_memory = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
+# assuming each link job takes around 7GiB of memory without LTO
 link_pool_depth = max(int(total_memory / 7e9), 1)
+if args.lto:
+    # ThinLTO provides its own parallel linking, use 16GiB for RAM size used
+    # by each link job
+    depth_with_lto = max(int(total_memory / 16e9), 2)
+    if depth_with_lto < link_pool_depth:
+        link_pool_depth = depth_with_lto
 
 selected_modes = args.selected_modes or modes.keys()
 default_modes = args.selected_modes or [mode for mode, mode_cfg in modes.items() if mode_cfg["default"]]
@@ -2132,13 +2153,14 @@ def get_extra_cxxflags(mode, mode_config, cxx, debuginfo):
     if debuginfo and mode_config['can_have_debug_info']:
         cxxflags += ['-g', '-gz']
 
-    # Since AssignmentTracking was enabled by default in clang
-    # (llvm/llvm-project@de6da6ad55d3ca945195d1cb109cb8efdf40a52a)
-    # coroutine frame debugging info (`coro_frame_ty`) is broken.
-    # 
-    # It seems that we aren't losing much by disabling AssigmentTracking,
-    # so for now we choose to disable it to get `coro_frame_ty` back.
-    cxxflags.append('-Xclang -fexperimental-assignment-tracking=disabled')
+    if 'clang' in cxx:
+        # Since AssignmentTracking was enabled by default in clang
+        # (llvm/llvm-project@de6da6ad55d3ca945195d1cb109cb8efdf40a52a)
+        # coroutine frame debugging info (`coro_frame_ty`) is broken.
+        #
+        # It seems that we aren't losing much by disabling AssigmentTracking,
+        # so for now we choose to disable it to get `coro_frame_ty` back.
+        cxxflags.append('-Xclang -fexperimental-assignment-tracking=disabled')
 
     return cxxflags
 

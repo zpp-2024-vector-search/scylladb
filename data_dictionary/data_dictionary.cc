@@ -55,6 +55,11 @@ keyspace::is_internal() const {
     return _ops->is_internal(*this);
 }
 
+bool
+keyspace::uses_tablets() const {
+    return metadata()->uses_tablets();
+}
+
 const locator::abstract_replication_strategy&
 keyspace::get_replication_strategy() const {
     return _ops->get_replication_strategy(*this);
@@ -228,7 +233,8 @@ keyspace_metadata::keyspace_metadata(std::string_view name,
 void keyspace_metadata::validate(const gms::feature_service& fs, const locator::topology& topology) const {
     using namespace locator;
     locator::replication_strategy_params params(strategy_options(), initial_tablets());
-    abstract_replication_strategy::validate_replication_strategy(name(), strategy_name(), params, fs, topology);
+    auto strategy = locator::abstract_replication_strategy::create_replication_strategy(strategy_name(), params);
+    strategy->validate_options(fs, topology);
 }
 
 lw_shared_ptr<keyspace_metadata>
@@ -456,7 +462,11 @@ auto fmt::formatter<data_dictionary::keyspace_metadata>::format(const data_dicti
     fmt::format_to(ctx.out(), "KSMetaData{{name={}, strategyClass={}, strategyOptions={}, cfMetaData={}, durable_writes={}, tablets=",
             m.name(), m.strategy_name(), m.strategy_options(), m.cf_meta_data(), m.durable_writes());
     if (m.initial_tablets()) {
-        fmt::format_to(ctx.out(), "{{\"initial\":{}}}", m.initial_tablets().value());
+        if (auto initial_tablets = m.initial_tablets().value()) {
+            fmt::format_to(ctx.out(), "{{\"initial\":{}}}", initial_tablets);
+        } else {
+            fmt::format_to(ctx.out(), "{{\"enabled\":true}}");
+        }
     } else {
         fmt::format_to(ctx.out(), "{{\"enabled\":false}}");
     }

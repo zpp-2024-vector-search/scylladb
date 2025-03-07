@@ -155,7 +155,10 @@ future<std::vector<tasks::task_stats>> node_ops_virtual_task::get_stats() {
             .sequence_number = 0,
             .keyspace = "",
             .table = "",
-            .entity = ""
+            .entity = "",
+            .shard = 0,
+            .start_time = entry.start_time,
+            .end_time = entry.end_time
         };
     }));
 }
@@ -203,7 +206,7 @@ task_manager_module::task_manager_module(tasks::task_manager& tm, service::stora
     , _ss(ss)
 {}
 
-std::set<gms::inet_address> task_manager_module::get_nodes() const {
+std::set<locator::host_id> task_manager_module::get_nodes() const {
     return get_task_manager().get_nodes(_ss);
 }
 

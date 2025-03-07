@@ -27,7 +27,7 @@ from io import BufferedWriter
 from test.pylib.host_registry import Host, HostRegistry
 from test.pylib.pool import Pool
 from test.pylib.rest_client import ScyllaRESTAPIClient, HTTPError
-from test.pylib.util import LogPrefixAdapter, read_last_line
+from test.pylib.util import LogPrefixAdapter, read_last_line, gather_safely
 from test.pylib.internal_types import ServerNum, IPAddress, HostID, ServerInfo, ServerUpState
 from functools import partial
 import aiohttp
@@ -1409,6 +1409,7 @@ class ScyllaClusterManager:
         add_put('/cluster/before-test/{test_case_name}', self._before_test_req)
         add_put('/cluster/after-test/{success}', self._after_test)
         add_put('/cluster/mark-dirty', self._mark_dirty)
+        add_put('/cluster/mark-clean', self._mark_clean)
         add_put('/cluster/server/{server_id}/stop', self._cluster_server_stop)
         add_put('/cluster/server/{server_id}/stop_gracefully', self._cluster_server_stop_gracefully)
         add_put('/cluster/server/{server_id}/start', self._cluster_server_start)
@@ -1517,6 +1518,12 @@ class ScyllaClusterManager:
         """Mark current cluster dirty"""
         assert self.cluster
         self.cluster.is_dirty = True
+
+    async def _mark_clean(self, _request) -> None:
+        """Mark current cluster clean"""
+        assert self.cluster
+        self.cluster.is_dirty = False
+        self.cluster.keyspace_count = self.cluster._get_keyspace_count()
 
     async def _server_stop(self, request: aiohttp.web.Request, gracefully: bool) -> None:
         """Stop a server. No-op if already stopped."""
@@ -1780,20 +1787,3 @@ async def get_cluster_manager(test_uname: str, clusters: Pool[ScyllaCluster], te
         yield manager
     finally:
         await manager.stop()
-
-
-async def gather_safely(*awaitables: Awaitable):
-    """
-    Developers using asyncio.gather() often assume that it waits for all futures (awaitables) givens.
-    But this isn't true when the return_exceptions parameter is False, which is the default.
-    In that case, as soon as one future completes with an exception, the gather() call will return this exception
-    immediately, and some of the finished tasks may continue to run in the background.
-    This is bad for applications that use gather() to ensure that a list of background tasks has all completed.
-    So such applications must use asyncio.gather() with return_exceptions=True, to wait for all given futures to
-    complete either successfully or unsuccessfully.
-    """
-    results = await asyncio.gather(*awaitables, return_exceptions=True)
-    for result in results:
-        if isinstance(result, BaseException):
-            raise result from None
-    return results

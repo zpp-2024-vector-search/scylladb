@@ -41,6 +41,7 @@
 #include "repair/repair.hh"
 #include "streaming/stream_reason.hh"
 #include "streaming/stream_mutation_fragments_cmd.hh"
+#include "streaming/stream_blob.hh"
 #include "cache_temperature.hh"
 #include "raft/raft.hh"
 #include "service/raft/group0_fwd.hh"
@@ -84,6 +85,7 @@
 #include "idl/storage_service.dist.hh"
 #include "idl/join_node.dist.hh"
 #include "idl/migration_manager.dist.hh"
+#include "idl/tasks.dist.hh"
 #include "message/rpc_protocol_impl.hh"
 #include "idl/consistency_level.dist.impl.hh"
 #include "idl/tracing.dist.impl.hh"
@@ -127,6 +129,7 @@
 #include "idl/mapreduce_request.dist.impl.hh"
 #include "idl/storage_service.dist.impl.hh"
 #include "idl/join_node.dist.impl.hh"
+#include "idl/tasks.dist.impl.hh"
 #include "gms/feature_service.hh"
 
 namespace netw {
@@ -287,17 +290,23 @@ rpc_resource_limits(size_t memory_limit) {
 
 future<> messaging_service::start() {
     if (_credentials_builder && !_credentials) {
-        return _credentials_builder->build_reloadable_server_credentials([](const std::unordered_set<sstring>& files, std::exception_ptr ep) {
-            if (ep) {
-                mlogger.warn("Exception loading {}: {}", files, ep);
-            } else {
-                mlogger.info("Reloaded {}", files);
-            }
-        }).then([this](shared_ptr<seastar::tls::server_credentials> creds) {
-            _credentials = std::move(creds);
-        });
+        if (this_shard_id() == 0) {
+            _credentials = co_await _credentials_builder->build_reloadable_server_credentials([this](const tls::credentials_builder& b, const std::unordered_set<sstring>& files, std::exception_ptr ep) -> future<> {
+                if (ep) {
+                    mlogger.warn("Exception loading {}: {}", files, ep);
+                } else {
+                    co_await container().invoke_on_others([&b](messaging_service& ms) {
+                        if (ms._credentials) {
+                            b.rebuild(*ms._credentials);
+                        }
+                    });
+                    mlogger.info("Reloaded {}", files);
+                }
+            });
+        } else {
+            _credentials = _credentials_builder->build_server_credentials();
+        }
     }
-    return make_ready_future<>();
 }
 
 future<> messaging_service::start_listen(locator::shared_token_metadata& stm, std::function<locator::host_id(gms::inet_address)> address_to_host_id_mapper) {
@@ -1270,6 +1279,39 @@ future<> messaging_service::unregister_stream_mutation_fragments() {
     return unregister_handler(messaging_verb::STREAM_MUTATION_FRAGMENTS);
 }
 
+// Wrapper for STREAM_BLOB
+rpc::sink<streaming::stream_blob_cmd_data> messaging_service::make_sink_for_stream_blob(rpc::source<streaming::stream_blob_cmd_data>& source) {
+    return source.make_sink<netw::serializer, streaming::stream_blob_cmd_data>();
+}
+
+future<std::tuple<rpc::sink<streaming::stream_blob_cmd_data>, rpc::source<streaming::stream_blob_cmd_data>>>
+messaging_service::make_sink_and_source_for_stream_blob(streaming::stream_blob_meta meta, locator::host_id id) {
+    if (is_shutting_down()) {
+        co_await coroutine::return_exception(rpc::closed_error());
+    }
+    auto rpc_client = get_rpc_client(messaging_verb::STREAM_BLOB, addr_for_host_id(id), id);
+    auto sink = co_await rpc_client->make_stream_sink<netw::serializer, streaming::stream_blob_cmd_data>();
+    std::exception_ptr ex;
+    try {
+        auto rpc_handler = rpc()->make_client<rpc::source<streaming::stream_blob_cmd_data> (streaming::stream_blob_meta, rpc::sink<streaming::stream_blob_cmd_data>)>(messaging_verb::STREAM_BLOB);
+        auto source = co_await rpc_handler(*rpc_client, meta, sink);
+        co_return std::make_tuple(std::move(sink), std::move(source));
+    } catch (...) {
+        ex = std::current_exception();
+    }
+    // Reach here only in case of error
+    co_await sink.close();
+    co_return coroutine::return_exception_ptr(ex);
+}
+
+void messaging_service::register_stream_blob(std::function<future<rpc::sink<streaming::stream_blob_cmd_data>> (const rpc::client_info& cinfo, streaming::stream_blob_meta meta, rpc::source<streaming::stream_blob_cmd_data> source)>&& func) {
+    register_handler(this, messaging_verb::STREAM_BLOB, std::move(func));
+}
+
+future<> messaging_service::unregister_stream_blob() {
+    return unregister_handler(messaging_verb::STREAM_BLOB);
+}
+
 template<class SinkType, class SourceType>
 future<std::tuple<rpc::sink<SinkType>, rpc::source<SourceType>>>
 do_make_sink_source(messaging_verb verb, uint32_t repair_meta_id, shard_id dst_shard_id, shared_ptr<messaging_service::rpc_protocol_client_wrapper> rpc_client, std::unique_ptr<messaging_service::rpc_protocol_wrapper>& rpc) {
@@ -1386,17 +1428,6 @@ unsigned messaging_service::add_statement_tenant(sstring tenant_name, scheduling
     _dynamic_tenants_to_client_idx.insert_or_assign(tenant_name, idx);
     undo.cancel();
     return idx;
-}
-
-// Wrapper for TASKS_CHILDREN_REQUEST
-void messaging_service::register_tasks_get_children(std::function<future<tasks::get_children_response> (const rpc::client_info& cinfo, tasks::get_children_request)>&& func) {
-    register_handler(this, messaging_verb::TASKS_GET_CHILDREN, std::move(func));
-}
-future<> messaging_service::unregister_tasks_get_children() {
-    return unregister_handler(messaging_verb::TASKS_GET_CHILDREN);
-}
-future<tasks::get_children_response> messaging_service::send_tasks_get_children(msg_addr id, tasks::get_children_request req) {
-    return send_message<future<tasks::get_children_response>>(this, messaging_verb::TASKS_GET_CHILDREN, std::move(id), std::move(req));
 }
 
 } // namespace net

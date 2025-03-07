@@ -19,7 +19,7 @@
 #include "mutation_query.hh"
 #include "mutation_compactor.hh"
 #include "counters.hh"
-#include "row_cache.hh"
+#include "db/row_cache.hh"
 #include "timestamp.hh"
 #include "view_info.hh"
 #include "mutation_cleaner.hh"
@@ -1591,7 +1591,7 @@ void row::apply_monotonically(const schema& our_schema, const schema& their_sche
 // we erase the live cells according to the shadowable_tombstone rules.
 static bool dead_marker_shadows_row(const schema& s, column_kind kind, const row_marker& marker) {
     return s.is_view()
-            && s.view_info()->has_base_non_pk_columns_in_view_pk()
+            && (s.view_info()->has_base_non_pk_columns_in_view_pk() || s.view_info()->has_computed_column_depending_on_base_non_primary_key())
             && !marker.is_live()
             && kind == column_kind::regular_column; // not applicable to static rows
 }
@@ -1761,12 +1761,12 @@ row row::difference(const schema& s, column_kind kind, const row& other) const
             if (cell) {
                 r.append_cell(c.key(), std::move(*cell));
             }
-        } else if (s.column_at(kind, c.key()).is_atomic()) {
+        } else if (cdef.is_atomic()) {
             if (compare_atomic_cell_for_merge(c->cell.as_atomic_cell(cdef), it->cell.as_atomic_cell(cdef)) > 0) {
                 r.append_cell(c.key(), c->cell.copy(*cdef.type));
             }
         } else {
-            auto diff = ::difference(*s.column_at(kind, c.key()).type,
+            auto diff = ::difference(*cdef.type,
                     c->cell.as_collection_mutation(), it->cell.as_collection_mutation());
             if (!static_cast<collection_mutation_view>(diff).is_empty()) {
                 r.append_cell(c.key(), std::move(diff));
@@ -1876,8 +1876,8 @@ mutation_querier::mutation_querier(const schema& s, query::result::partition_wri
                                    query::result_memory_accounter& memory_accounter)
     : _schema(s)
     , _memory_accounter(memory_accounter)
-    , _pw(std::move(pw))
     , _static_cells_wr(pw.start().start_static_row().start_cells())
+    , _pw(std::move(pw))
 {
 }
 

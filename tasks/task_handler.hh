@@ -15,7 +15,7 @@
 namespace tasks {
 
 struct task_identity {
-    gms::inet_address node;
+    locator::host_id host_id;
     task_id task_id;
 };
 
@@ -50,6 +50,9 @@ struct task_stats {
     std::string keyspace;
     std::string table;
     std::string entity;
+    unsigned shard;
+    db_clock::time_point start_time;
+    db_clock::time_point end_time;
 };
 
 struct status_helper;

@@ -9,6 +9,7 @@
 #include <seastar/core/on_internal_error.hh>
 #include <map>
 #include "cql3/description.hh"
+#include "db/tablet_options.hh"
 #include "db/view/view.hh"
 #include "timestamp.hh"
 #include "utils/assert.hh"
@@ -35,6 +36,9 @@
 #include "index/target_parser.hh"
 #include "utils/hashing.hh"
 #include "utils/hashers.hh"
+#include "alternator/extract_from_attrs.hh"
+
+#include <boost/lexical_cast.hpp>
 
 constexpr int32_t schema::NAME_LENGTH;
 
@@ -82,6 +86,10 @@ speculative_retry::from_sstring(sstring str) {
     } else if (str.compare(str.size() - percentile.size(), percentile.size(), percentile) == 0) {
         t = type::PERCENTILE;
         v = convert(percentile) / 100;
+        if  (v <= 0.0 || v >= 1.0) {
+            throw exceptions::configuration_exception(
+                format("Invalid value {} for PERCENTILE option 'speculative_retry': must be between (0.0 and 100.0)", str));
+        }
     } else {
         throw std::invalid_argument(format("cannot convert {} to speculative_retry\n", str));
     }
@@ -582,6 +590,7 @@ bool operator==(const schema& x, const schema& y)
         && x._raw._indices_by_name == y._raw._indices_by_name
         && x._raw._is_counter == y._raw._is_counter
         && x._raw._in_memory == y._raw._in_memory
+        && x._raw._tablet_options == y._raw._tablet_options
         ;
 }
 
@@ -669,6 +678,8 @@ table_schema_version schema::calculate_digest(const schema::raw_schema& r) {
         feed_hash(h, name);
         feed_hash(h, ext->options_to_string());
     }
+
+    feed_hash(h, r._tablet_options);
 
     return table_schema_version(utils::UUID_gen::get_name_UUID(h.finalize()));
 }
@@ -838,6 +849,17 @@ auto fmt::formatter<schema>::format(const schema& s, fmt::format_context& ctx) c
     out = fmt::format_to(out, ",minIndexInterval={}", s._raw._min_index_interval);
     out = fmt::format_to(out, ",maxIndexInterval={}", s._raw._max_index_interval);
     out = fmt::format_to(out, ",speculativeRetry={}", s._raw._speculative_retry.to_sstring());
+    out = fmt::format_to(out, ",tablets={{");
+    if (s._raw._tablet_options) {
+        n = 0;
+        for (auto& [k, v] : *s._raw._tablet_options) {
+            if (n++) {
+                out = fmt::format_to(out, ", ");
+            }
+            out = fmt::format_to(out, "{}={}", k, v);
+        }
+    }
+    out = fmt::format_to(out, "}}");
     out = fmt::format_to(out, ",triggers=[]");
     out = fmt::format_to(out, ",isDense={}", s._raw._is_dense);
     out = fmt::format_to(out, ",in_memory={}", s._raw._in_memory);
@@ -997,15 +1019,20 @@ sstring schema::get_create_statement(const schema_describe_helper& helper, bool 
             return std::move(os).str();
         } else {
             os << "MATERIALIZED VIEW " << cql3::util::maybe_quote(ks_name()) << "." << cql3::util::maybe_quote(cf_name()) << " AS\n";
-            os << "    SELECT ";
-            for (auto& cdef : all_columns()) {
-                if (cdef.is_hidden_from_cql()) {
-                    continue;
+            if (view_info()->include_all_columns()) {
+                os << "    SELECT *";
+            }
+            else {
+                os << "    SELECT ";
+                for (auto& cdef : all_columns()) {
+                    if (cdef.is_hidden_from_cql()) {
+                        continue;
+                    }
+                    if (n++ != 0) {
+                        os << ", ";
+                    }
+                    os << cdef.name_as_cql_string();
                 }
-                if (n++ != 0) {
-                    os << ", ";
-                }
-                os << cdef.name_as_cql_string();
             }
             os << "\n    FROM " << cql3::util::maybe_quote(ks_name()) << "." <<  cql3::util::maybe_quote(view_info()->base_name());
             os << "\n    WHERE " << view_info()->where_clause();
@@ -1141,7 +1168,13 @@ std::ostream& schema::schema_properties(const schema_describe_helper& helper, st
     os << "\n    AND memtable_flush_period_in_ms = " << memtable_flush_period();
     os << "\n    AND min_index_interval = " << min_index_interval();
     os << "\n    AND speculative_retry = '" << speculative_retry().to_sstring() << "'";
-    
+
+    if (has_tablet_options()) {
+        os << "\n    AND tablets = {";
+        map_as_cql_param(os, tablet_options().to_map());
+        os << "}";
+    }
+
     for (auto& [type, ext] : extensions()) {
         os << "\n    AND " << type << " = " << ext->options_to_string();
     }
@@ -1626,6 +1659,22 @@ const ::tombstone_gc_options& schema::tombstone_gc_options() const {
     return default_tombstone_gc_options;
 }
 
+bool schema::has_tablet_options() const noexcept {
+    return _raw._tablet_options.has_value();
+}
+
+db::tablet_options schema::tablet_options() const {
+    return db::tablet_options(raw_tablet_options());
+}
+
+const db::tablet_options::map_type& schema::raw_tablet_options() const noexcept {
+    if (!_raw._tablet_options) {
+        static db::tablet_options::map_type no_options;
+        return no_options;
+    }
+    return *_raw._tablet_options;
+}
+
 schema_builder& schema_builder::with_cdc_options(const cdc::options& opts) {
     add_extension(cdc::cdc_extension::NAME, ::make_shared<cdc::cdc_extension>(opts));
     return *this;
@@ -1643,6 +1692,11 @@ schema_builder& schema_builder::with_per_partition_rate_limit_options(const db::
 
 schema_builder& schema_builder::set_paxos_grace_seconds(int32_t seconds) {
     add_extension(db::paxos_grace_seconds_extension::NAME, ::make_shared<db::paxos_grace_seconds_extension>(seconds));
+    return *this;
+}
+
+schema_builder& schema_builder::set_tablet_options(std::map<sstring, sstring>&& hints) {
+    _raw._tablet_options = std::move(hints);
     return *this;
 }
 
@@ -2046,6 +2100,9 @@ column_computation_ptr column_computation::deserialize(bytes_view raw) {
                 return collection->clone();
             }
         }
+    }
+    if (type == alternator::extract_from_attrs_column_computation::TYPE_NAME) {
+        return std::make_unique<alternator::extract_from_attrs_column_computation>(parsed);
     }
     throw std::runtime_error(format("Incorrect column computation type {} found when parsing {}", *type_json, parsed));
 }

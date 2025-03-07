@@ -25,15 +25,12 @@
 #include "utils/human_readable.hh"
 #include "utils/memory_limit_reached.hh"
 
-#include <boost/range/algorithm/for_each.hpp>
-
 logger rcslog("reader_concurrency_semaphore");
 
 struct reader_concurrency_semaphore::inactive_read {
     mutation_reader reader;
     const dht::partition_range* range = nullptr;
     eviction_notify_handler notify_handler;
-    timer<lowres_clock> ttl_timer;
     inactive_read_handle* handle = nullptr;
 
     explicit inactive_read(mutation_reader reader_, const dht::partition_range* range_) noexcept
@@ -44,7 +41,6 @@ struct reader_concurrency_semaphore::inactive_read {
         : reader(std::move(o.reader))
         , range(o.range)
         , notify_handler(std::move(o.notify_handler))
-        , ttl_timer(std::move(o.ttl_timer))
         , handle(o.handle)
     {
         o.handle = nullptr;
@@ -148,9 +144,6 @@ public:
         promise<> pr;
         std::optional<shared_future<>> fut;
         reader_concurrency_semaphore::read_func func;
-        // Self reference to keep the permit alive while queued for execution.
-        // Must be cleared on all code-paths, otherwise it will keep the permit alive in perpetuity.
-        reader_permit_opt permit_keepalive;
         std::optional<reader_concurrency_semaphore::inactive_read> ir;
     };
 
@@ -226,8 +219,6 @@ private:
     }
 
     void on_timeout() {
-        auto keepalive = std::exchange(_aux_data.permit_keepalive, std::nullopt);
-
         auto ex = named_semaphore_timed_out(_semaphore._name);
         _ex = std::make_exception_ptr(ex);
 
@@ -500,7 +491,11 @@ public:
         _trace_ptr = std::move(trace_ptr);
     }
 
-    void check_abort() {
+    bool aborted() const {
+        return bool(_ex);
+    }
+
+    void check_abort() const {
         if (_ex) {
             std::rethrow_exception(_ex);
         }
@@ -649,7 +644,7 @@ void reader_permit::set_trace_state(tracing::trace_state_ptr trace_ptr) noexcept
     _impl->set_trace_state(std::move(trace_ptr));
 }
 
-void reader_permit::check_abort() {
+void reader_permit::check_abort() const {
     return _impl->check_abort();
 }
 
@@ -1133,6 +1128,11 @@ reader_concurrency_semaphore::~reader_concurrency_semaphore() {
 reader_concurrency_semaphore::inactive_read_handle reader_concurrency_semaphore::register_inactive_read(mutation_reader reader,
         const dht::partition_range* range) noexcept {
     auto& permit = reader.permit();
+    if (permit->aborted()) {
+        permit->release_base_resources();
+        close_reader(std::move(reader));
+        return inactive_read_handle();
+    }
     if (permit->get_state() == reader_permit::state::waiting_for_memory) {
         // Kill all outstanding memory requests, the read is going to be evicted.
         permit->aux_data().pr.set_exception(std::make_exception_ptr(std::bad_alloc{}));
@@ -1170,10 +1170,7 @@ void reader_concurrency_semaphore::set_notify_handler(inactive_read_handle& irh,
     auto& ir = *(*irh._permit)->aux_data().ir;
     ir.notify_handler = std::move(notify_handler);
     if (ttl_opt) {
-        ir.ttl_timer.set_callback([this, permit = *irh._permit] () mutable {
-            evict(*permit, evict_reason::time);
-        });
-        ir.ttl_timer.arm(lowres_clock::now() + *ttl_opt);
+        irh._permit->set_timeout(lowres_clock::now() + *ttl_opt);
     }
 }
 
@@ -1275,7 +1272,6 @@ future<> reader_concurrency_semaphore::stop() noexcept {
 void reader_concurrency_semaphore::do_detach_inactive_reader(reader_permit::impl& permit, evict_reason reason) noexcept {
     dequeue_permit(permit);
     auto& ir = *permit.aux_data().ir;
-    ir.ttl_timer.cancel();
     ir.detach();
     ir.reader.permit()->on_evicted();
     tracing::trace(permit.trace_state(), "[reader_concurrency_semaphore {}] evicted, reason: {}", _name, reason);
@@ -1628,10 +1624,10 @@ reader_permit reader_concurrency_semaphore::make_tracking_only_permit(schema_ptr
 }
 
 future<> reader_concurrency_semaphore::with_permit(schema_ptr schema, const char* const op_name, size_t memory,
-        db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_ptr, read_func func) {
-    auto permit = reader_permit(*this, std::move(schema), std::string_view(op_name), {1, static_cast<ssize_t>(memory)}, timeout, std::move(trace_ptr));
+        db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_ptr, reader_permit_opt& permit_holder, read_func func) {
+    permit_holder = reader_permit(*this, std::move(schema), std::string_view(op_name), {1, static_cast<ssize_t>(memory)}, timeout, std::move(trace_ptr));
+    auto permit = *permit_holder;
     permit->aux_data().func = std::move(func);
-    permit->aux_data().permit_keepalive = permit;
     return do_wait_admission(*permit);
 }
 
@@ -1680,10 +1676,11 @@ std::string reader_concurrency_semaphore::dump_diagnostics(unsigned max_lines) c
 }
 
 void reader_concurrency_semaphore::foreach_permit(noncopyable_function<void(const reader_permit::impl&)> func) const {
-    boost::for_each(_permit_list, std::ref(func));
-    boost::for_each(_wait_list._admission_queue, std::ref(func));
-    boost::for_each(_wait_list._memory_queue, std::ref(func));
-    boost::for_each(_ready_list, std::ref(func));
+    std::ranges::for_each(_permit_list, std::ref(func));
+    std::ranges::for_each(_wait_list._admission_queue, std::ref(func));
+    std::ranges::for_each(_wait_list._memory_queue, std::ref(func));
+    std::ranges::for_each(_ready_list, std::ref(func));
+    std::ranges::for_each(_inactive_reads, std::ref(func));
 }
 
 void reader_concurrency_semaphore::foreach_permit(noncopyable_function<void(const reader_permit&)> func) const {

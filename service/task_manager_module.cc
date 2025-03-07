@@ -8,6 +8,7 @@
 
 #include "locator/tablets.hh"
 #include "replica/database.hh"
+#include "service/migration_manager.hh"
 #include "service/storage_service.hh"
 #include "service/task_manager_module.hh"
 #include "tasks/task_handler.hh"
@@ -57,7 +58,8 @@ static std::optional<tasks::task_stats> maybe_make_task_stats(const locator::tab
         .scope = get_scope(task_info.request_type),
         .state = tasks::task_manager::task_state::running,
         .keyspace = schema->ks_name(),
-        .table = schema->cf_name()
+        .table = schema->cf_name(),
+        .start_time = task_info.request_time
     };
 }
 
@@ -78,9 +80,12 @@ static bool tablet_id_provided(const locator::tablet_task_type& task_type) {
 }
 
 future<std::optional<tasks::virtual_task_hint>> tablet_virtual_task::contains(tasks::task_id task_id) const {
+    co_await _ss._migration_manager.local().get_group0_barrier().trigger();
+
+    auto tmptr = _ss.get_token_metadata_ptr();
     auto tables = get_table_ids();
     for (auto table : tables) {
-        auto& tmap = _ss.get_token_metadata().tablets().get_tablet_map(table);
+        auto& tmap = tmptr->tablets().get_tablet_map(table);
         if (auto task_type = maybe_get_task_type(tmap.resize_task_info(), task_id); task_type.has_value()) {
             co_return tasks::virtual_task_hint{
                 .table_id = table,
@@ -153,6 +158,8 @@ future<std::optional<tasks::task_status>> tablet_virtual_task::wait(tasks::task_
         auto new_tablet_count = _ss.get_token_metadata().tablets().get_tablet_map(table).tablet_count();
         res->status.state = new_tablet_count == tablet_count ? tasks::task_manager::task_state::suspended : tasks::task_manager::task_state::done;
         res->status.children = task_type == locator::tablet_task_type::split ? co_await get_children(get_module(), id) : std::vector<tasks::task_identity>{};
+    } else {
+        res->status.children = co_await get_children(get_module(), id);
     }
     res->status.end_time = db_clock::now(); // FIXME: Get precise end time.
     co_return res->status;
@@ -169,9 +176,10 @@ future<> tablet_virtual_task::abort(tasks::task_id id, tasks::virtual_task_hint 
 
 future<std::vector<tasks::task_stats>> tablet_virtual_task::get_stats() {
     std::vector<tasks::task_stats> res;
+    auto tmptr = _ss.get_token_metadata_ptr();
     auto tables = get_table_ids();
     for (auto table : tables) {
-        auto& tmap = _ss.get_token_metadata().tablets().get_tablet_map(table);
+        auto& tmap = tmptr->tablets().get_tablet_map(table);
         auto schema = _ss._db.local().get_tables_metadata().get_table(table).schema();
         std::unordered_map<tasks::task_id, tasks::task_stats> user_requests;
         std::unordered_map<tasks::task_id, size_t> sched_num_sum;
@@ -233,7 +241,8 @@ future<std::optional<status_helper>> tablet_virtual_task::get_status_helper(task
         .table = schema->cf_name(),
     };
     size_t sched_nr = 0;
-    auto& tmap = _ss.get_token_metadata().tablets().get_tablet_map(table);
+    auto tmptr = _ss.get_token_metadata_ptr();
+    auto& tmap = tmptr->tablets().get_tablet_map(table);
     if (is_repair_task(task_type)) {
         co_await tmap.for_each_tablet([&] (locator::tablet_id tid, const locator::tablet_info& info) {
             auto& task_info = info.repair_task_info;
@@ -243,6 +252,7 @@ future<std::optional<status_helper>> tablet_virtual_task::get_status_helper(task
             }
             return make_ready_future();
         });
+        res.status.children = co_await get_children(get_module(), id);
     } else if (is_migration_task(task_type)) {    // Migration task.
         auto tablet_id = hint.get_tablet_id();
         res.pending_replica = tmap.get_tablet_transition_info(tablet_id)->pending_replica;
@@ -274,7 +284,7 @@ task_manager_module::task_manager_module(tasks::task_manager& tm, service::stora
     , _ss(ss)
 {}
 
-std::set<gms::inet_address> task_manager_module::get_nodes() const {
+std::set<locator::host_id> task_manager_module::get_nodes() const {
     return get_task_manager().get_nodes(_ss);
 }
 

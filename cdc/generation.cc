@@ -1025,7 +1025,7 @@ future<> generation_service::legacy_handle_cdc_generation(std::optional<cdc::gen
     if (using_this_gen) {
         cdc_log.info("Starting to use generation {}", *gen_id);
         co_await update_streams_description(*gen_id, _sys_ks.local(), get_sys_dist_ks(),
-                [tmptr = _token_metadata.get()] { return tmptr->count_normal_token_owners(); },
+                [&tm = _token_metadata] { return tm.get()->count_normal_token_owners(); },
                 _abort_src);
     }
 }
@@ -1042,7 +1042,7 @@ void generation_service::legacy_async_handle_cdc_generation(cdc::generation_id g
                 if (using_this_gen) {
                     cdc_log.info("Starting to use generation {}", gen_id);
                     co_await update_streams_description(gen_id, svc->_sys_ks.local(), svc->get_sys_dist_ks(),
-                            [tmptr = svc->_token_metadata.get()] { return tmptr->count_normal_token_owners(); },
+                            [&tm = svc->_token_metadata] { return tm.get()->count_normal_token_owners(); },
                             svc->_abort_src);
                 }
                 co_return;
@@ -1112,7 +1112,9 @@ future<bool> generation_service::legacy_do_handle_cdc_generation(cdc::generation
     auto sys_dist_ks = get_sys_dist_ks();
     auto gen = co_await retrieve_generation_data(gen_id, _sys_ks.local(), *sys_dist_ks, { _token_metadata.get()->count_normal_token_owners() });
     if (!gen) {
-        throw std::runtime_error(fmt::format(
+        // This may happen during raft upgrade when a node gossips about a generation that
+        // was propagated through raft and we didn't apply it yet.
+        throw generation_handling_nonfatal_exception(fmt::format(
             "Could not find CDC generation {} in distributed system tables (current time: {}),"
             " even though some node gossiped about it.",
             gen_id, db_clock::now()));

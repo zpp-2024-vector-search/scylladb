@@ -16,7 +16,9 @@
 #include "streaming/stream_session_state.hh"
 #include <seastar/core/metrics.hh>
 #include <seastar/core/coroutine.hh>
+#include <seastar/coroutine/maybe_yield.hh>
 #include "db/config.hh"
+#include "utils/labels.hh"
 
 namespace streaming {
 
@@ -24,7 +26,7 @@ extern logging::logger sslog;
 
 stream_manager::stream_manager(db::config& cfg,
             sharded<replica::database>& db,
-            sharded<db::view::view_builder>& view_builder,
+            db::view::view_builder& view_builder,
             sharded<netw::messaging_service>& ms,
             sharded<service::migration_manager>& mm,
             gms::gossiper& gossiper, scheduling_group sg)
@@ -59,22 +61,22 @@ stream_manager::stream_manager(db::config& cfg,
                         sm::description("Total number of bytes sent on this shard.")),
 
         sm::make_gauge("finished_percentage", [this] { return _finished_percentage[streaming::stream_reason::bootstrap]; },
-                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("bootstrap")}),
+                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("bootstrap"), basic_level}),
 
         sm::make_gauge("finished_percentage", [this] { return _finished_percentage[streaming::stream_reason::decommission]; },
-                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("decommission")}),
+                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("decommission"), basic_level}),
 
         sm::make_gauge("finished_percentage", [this] { return _finished_percentage[streaming::stream_reason::removenode]; },
-                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("removenode")}),
+                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("removenode"), basic_level}),
 
         sm::make_gauge("finished_percentage", [this] { return _finished_percentage[streaming::stream_reason::rebuild]; },
-                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("rebuild")}),
+                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("rebuild"), basic_level}),
 
         sm::make_gauge("finished_percentage", [this] { return _finished_percentage[streaming::stream_reason::repair]; },
-                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("repair")}),
+                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("repair"), basic_level}),
 
         sm::make_gauge("finished_percentage", [this] { return _finished_percentage[streaming::stream_reason::replace]; },
-                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("replace")}),
+                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("replace"), basic_level}),
     });
 }
 
@@ -310,6 +312,20 @@ bool stream_manager::has_peer(inet_address endpoint) const {
         }
     }
     return false;
+}
+
+future<> stream_manager::fail_stream_plan(streaming::plan_id plan_id) {
+    return container().invoke_on_all([plan_id] (auto& sm) -> future<> {
+        for (auto sr : sm.get_all_streams()) {
+            for (auto session : sr->get_coordinator()->get_all_stream_sessions()) {
+                co_await seastar::coroutine::maybe_yield();
+                if (session->plan_id() == plan_id) {
+                    sslog.info("stream_manager: Failed stream_session for stream_plan plan_id={}", plan_id);
+                    session->close_session(stream_session_state::FAILED);
+                }
+            }
+        }
+    });
 }
 
 void stream_manager::fail_sessions(inet_address endpoint) {

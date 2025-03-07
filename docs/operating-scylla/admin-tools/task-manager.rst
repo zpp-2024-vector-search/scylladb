@@ -45,7 +45,10 @@ task_stats
 - *sequence_number* - an operation number (per module). It is shared by all tasks in a tree. Irrelevant for cluster tasks;
 - *keyspace* - optional, name of a keyspace on which the task operates;
 - *table* - optional, name of a table on which the task operates;
-- *entity* - optional, additional info specific to the task.
+- *entity* - optional, additional info specific to the task;
+- *shard* - optional, shard id on which the task operates;
+- *start_time* - relevant only if state != created;
+- *end_time* - relevant only if the task is finished (state in [done, failed]).
 
 
 task_status
@@ -54,11 +57,8 @@ task_status
 All fields from task_stats and additionally:
 
 - *is_abortable* - a flag that decides whether the task can be aborted through API;
-- *start_time* - relevant only if state == created;
-- *end_time* - relevant only if the task is finished (state in [done, failed]);
 - *error* - relevant only if the task failed;
 - *parent_id* - relevant only if the task has a parent;
-- *shard* - optional, shard id on which the task operates;
 - *progress_units* - a unit of progress;
 - *progress_total* - job size in progress_units;
 - *progress_completed* - current progress in progress_units;
@@ -74,13 +74,13 @@ API calls
 	- *keyspace* - if set, tasks are filtered to contain only the ones working on this keyspace;
 	- *table* - if set, tasks are filtered to contain only the ones working on this table;
 
-* ``/task_manager/task_status/{task_id}`` - gets the task's status, unregisters the task if it's finished;
+* ``/task_manager/task_status/{task_id}`` - gets the task's status;
 * ``/task_manager/abort_task/{task_id}`` - aborts the task if it's abortable, otherwise 403 status code is returned;
-* ``/task_manager/wait_task/{task_id}`` - waits for the task and gets its status (does not unregister the tasks); query params:
+* ``/task_manager/wait_task/{task_id}`` - waits for the task and gets its status; query params:
 
 	- *timeout* - timeout in seconds; if set - 408 status code is returned if waiting times out;
 
-* ``/task_manager/task_status_recursive/{task_id}`` - gets statuses of the task and all its descendants in BFS order, unregisters the root task;
+* ``/task_manager/task_status_recursive/{task_id}`` - gets statuses of the task and all its descendants in BFS order;
 * ``/task_manager/ttl`` - gets or sets new ttl; query params (if setting):
 
 	- *ttl* - new ttl value.
@@ -88,6 +88,8 @@ API calls
 * ``/task_manager/user_ttl`` - gets or sets new user ttl; query params (if setting):
 
 	- *user_ttl* - new user ttl value.
+
+* ``/task_manager/drain/{module}`` - unregisters all finished local tasks in the module.
 
 Cluster tasks are not unregistered from task manager with API calls.
 

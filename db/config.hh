@@ -9,7 +9,6 @@
 
 #pragma once
 
-#include <boost/program_options/options_description.hpp>
 #include <unordered_map>
 
 #include <seastar/core/sstring.hh>
@@ -27,6 +26,12 @@
 #include "utils/error_injection.hh"
 #include "utils/dict_trainer.hh"
 #include "utils/advanced_rpc_compressor.hh"
+
+namespace boost::program_options {
+
+class options_description_easy_init;
+
+}
 
 namespace seastar {
 class file;
@@ -141,6 +146,9 @@ public:
     void add_per_partition_rate_limit_extension();
     void add_tags_extension();
     void add_tombstone_gc_extension();
+    void add_paxos_grace_seconds_extension();
+
+    void add_all_default_extensions();
 
     /// True iff the feature is enabled.
     bool check_experimental(experimental_features_t::feature f) const;
@@ -243,6 +251,7 @@ public:
     named_value<uint32_t> inter_dc_stream_throughput_outbound_megabits_per_sec;
     named_value<uint32_t> stream_io_throughput_mb_per_sec;
     named_value<double> stream_plan_ranges_fraction;
+    named_value<bool> enable_file_stream;
     named_value<bool> trickle_fsync;
     named_value<uint32_t> trickle_fsync_interval_in_kb;
     named_value<bool> auto_bootstrap;
@@ -496,7 +505,8 @@ public:
     named_value<int> maximum_replication_factor_warn_threshold;
     named_value<int> maximum_replication_factor_fail_threshold;
 
-    named_value<int> tablets_initial_scale_factor;
+    named_value<double> tablets_initial_scale_factor;
+    named_value<unsigned> tablets_per_shard_goal;
     named_value<uint64_t> target_tablet_size_in_bytes;
 
     named_value<std::vector<enum_option<replication_strategy_restriction_t>>> replication_strategy_warn_list;

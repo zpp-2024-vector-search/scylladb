@@ -89,6 +89,7 @@
 #include "db/operation_type.hh"
 #include "locator/util.hh"
 #include "tools/build_info.hh"
+#include "utils/labels.hh"
 
 namespace bi = boost::intrusive;
 
@@ -239,7 +240,8 @@ class storage_proxy::remote {
     raft_group0_client& _group0_client;
     topology_state_machine& _topology_state_machine;
     abort_source _group0_as;
-    future<> _truncate_table_fiber = make_ready_future<>();
+
+    seastar::gate _truncate_gate;
 
     netw::connection_drop_slot_t _connection_dropped;
     netw::connection_drop_registration_t _condrop_registration;
@@ -277,7 +279,7 @@ public:
     // Must call before destroying the `remote` object.
     future<> stop() {
         _group0_as.request_abort();
-        co_await std::move(_truncate_table_fiber);
+        co_await _truncate_gate.close();
         co_await ser::storage_proxy_rpc_verbs::unregister(&_ms);
         _stopped = true;
     }
@@ -452,20 +454,13 @@ public:
     }
 
     future<> truncate_with_tablets(sstring ks_name, sstring cf_name, std::chrono::milliseconds timeout_in_ms) {
-        if (!_truncate_table_fiber.available()) {
-            throw std::runtime_error("Another TRUNCATE TABLE is ongoing, please retry.");
-        }
-        auto sem = make_lw_shared<seastar::semaphore>(0);
-        _truncate_table_fiber = request_truncate_with_tablets(ks_name, cf_name).then_wrapped([sem] (auto f) {
-            if (f.failed()) {
-                sem->broken(f.get_exception());
-            } else {
-                sem->signal(1);
-            }
-        });
+        // We want timeout on truncate to return an error to the client, but the truncate fiber to continue running
         try {
-            co_await sem->wait(timeout_in_ms, 1);
-        } catch (seastar::semaphore_timed_out&) {
+            co_await with_timeout(std::chrono::steady_clock::now() + timeout_in_ms, seastar::with_gate(_truncate_gate, [=, this] () -> future<> {
+                co_await request_truncate_with_tablets(ks_name, cf_name);
+            }));
+        } catch (seastar::timed_out_error&) {
+            slogger.warn("Timeout during TRUNCATE TABLE of {}.{}", ks_name, cf_name);
             throw std::runtime_error(format("Timeout during TRUNCATE TABLE of {}.{}", ks_name, cf_name));
         }
     }
@@ -1081,19 +1076,40 @@ private:
         while (true) {
             group0_guard guard = co_await _group0_client.start_operation(_group0_as, raft_timeout{});
 
-            if (_topology_state_machine._topology.global_request.has_value()) {
-                throw exceptions::invalid_request_exception("Another global topology request is ongoing, please retry.");
+            const table_id table_id = _sp.local_db().find_uuid(ks_name, cf_name);
+
+            // Check if we already have a truncate queued for the same table. This can happen when a truncate has timed out
+            // and the client retried by issuing the same truncate again. In this case, instead of failing the request with
+            // an "Another global topology request is ongoing" error, we can wait for the already queued request to complete.
+            // Note that we can not do this for a truncate which the topology coordinator has already started processing,
+            // only for a truncate which is still waiting.
+            std::optional<global_topology_request>& global_request = _topology_state_machine._topology.global_request;
+            if (global_request.has_value()) {
+                if (*global_request == global_topology_request::truncate_table) {
+                    std::optional<topology::transition_state>& tstate = _topology_state_machine._topology.tstate;
+                    if (!tstate || *tstate != topology::transition_state::truncate_table) {
+                        const utils::UUID& ongoing_global_request_id = *_topology_state_machine._topology.global_request_id;
+                        const auto topology_requests_entry = co_await _sys_ks.local().get_topology_request_entry(ongoing_global_request_id, true);
+                        if (topology_requests_entry.truncate_table_id == table_id) {
+                            global_request_id = ongoing_global_request_id;
+                            slogger.info("Ongoing TRUNCATE for table {}.{} (global request ID {}) detected; waiting for it to complete",
+                                                ks_name, cf_name, global_request_id);
+                            break;
+                        }
+                    }
+                }
+                slogger.warn("Another global topology request ({}) is ongoing during attempt to TRUNCATE table {}.{}",
+                                *global_request, ks_name, cf_name);
+                throw exceptions::invalid_request_exception(::format("Another global topology request is ongoing during attempt to TRUNCATE table {}.{}, please retry.",
+                                                                        ks_name, cf_name));
             }
 
             global_request_id = guard.new_group0_state_id();
-
-            const table_id table_id = _sp.local_db().find_uuid(ks_name, cf_name);
 
             std::vector<canonical_mutation> updates;
             updates.emplace_back(topology_mutation_builder(guard.write_timestamp())
                                     .set_global_topology_request(global_topology_request::truncate_table)
                                     .set_global_topology_request_id(global_request_id)
-                                    .set_session(session_id(global_request_id))
                                     .build());
 
             updates.emplace_back(topology_request_tracking_mutation_builder(global_request_id)
@@ -1101,6 +1117,8 @@ private:
                                     .set("done", false)
                                     .set("start_time", db_clock::now())
                                     .build());
+
+            slogger.info("Creating TRUNCATE global topology request for table {}.{}", ks_name, cf_name);
 
             topology_change change{std::move(updates)};
             sstring reason = "Truncating table";
@@ -2702,18 +2720,18 @@ void storage_proxy_stats::write_stats::register_stats() {
     namespace sm = seastar::metrics;
     auto new_metrics = sm::metric_groups();
     new_metrics.add_group(COORDINATOR_STATS_CATEGORY, {
-            sm::make_summary("write_latency_summary", sm::description("Write latency summary"), [this] {return to_metrics_summary(write.summary());})(storage_proxy_stats::current_scheduling_group_label()).set_skip_when_empty(),
+            sm::make_summary("write_latency_summary", sm::description("Write latency summary"), [this] {return to_metrics_summary(write.summary());})(storage_proxy_stats::current_scheduling_group_label())(basic_level).set_skip_when_empty(),
             sm::make_histogram("write_latency", sm::description("The general write latency histogram"),
-                    {storage_proxy_stats::current_scheduling_group_label()},
+                    {storage_proxy_stats::current_scheduling_group_label(), basic_level},
                     [this]{return to_metrics_histogram(write.histogram());}).aggregate({seastar::metrics::shard_label}).set_skip_when_empty(),
 
             sm::make_queue_length("foreground_writes", [this] { return writes - background_writes; },
                            sm::description("number of currently pending foreground write requests"),
-                           {storage_proxy_stats::current_scheduling_group_label()}),
+                           {storage_proxy_stats::current_scheduling_group_label(), basic_level}),
 
             sm::make_queue_length("background_writes", background_writes,
                            sm::description("number of currently pending background write requests"),
-                           {storage_proxy_stats::current_scheduling_group_label()}),
+                           {storage_proxy_stats::current_scheduling_group_label(), basic_level}),
 
             sm::make_queue_length("current_throttled_base_writes", throttled_base_writes,
                            sm::description("number of currently throttled base replica write requests"),
@@ -2737,11 +2755,11 @@ void storage_proxy_stats::write_stats::register_stats() {
 
             sm::make_total_operations("write_timeouts", [this]{return write_timeouts.count();},
                            sm::description("number of write request failed due to a timeout"),
-                           {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                           {storage_proxy_stats::current_scheduling_group_label(), basic_level}).set_skip_when_empty(),
 
             sm::make_total_operations("write_unavailable", [this]{return write_unavailables.count();},
                            sm::description("number write requests failed due to an \"unavailable\" error"),
-                           {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                           {storage_proxy_stats::current_scheduling_group_label(), basic_level}).set_skip_when_empty(),
 
             sm::make_total_operations("write_rate_limited", [this]{return write_rate_limited_by_replicas.count();},
                            sm::description("number of write requests which were rejected because rate limit for the partition was reached. rejected_by_coordinator indicates if it was rejected by the coordinator or the replica"),
@@ -2801,14 +2819,14 @@ void storage_proxy_stats::stats::register_stats() {
     write_stats::register_stats();
     auto new_metrics = sm::metric_groups();
     new_metrics.add_group(COORDINATOR_STATS_CATEGORY, {
-        sm::make_summary("read_latency_summary", sm::description("Read latency summary"), [this] {return to_metrics_summary(read.summary());})(storage_proxy_stats::current_scheduling_group_label()).set_skip_when_empty(),
+        sm::make_summary("read_latency_summary", sm::description("Read latency summary"), [this] {return to_metrics_summary(read.summary());})(storage_proxy_stats::current_scheduling_group_label())(basic_level).set_skip_when_empty(),
         sm::make_histogram("read_latency", sm::description("The general read latency histogram"),
-                {storage_proxy_stats::current_scheduling_group_label()},
+                {storage_proxy_stats::current_scheduling_group_label(), basic_level},
                 [this]{ return to_metrics_histogram(read.histogram());}).aggregate({seastar::metrics::shard_label}).set_skip_when_empty(),
 
         sm::make_queue_length("foreground_reads", foreground_reads,
                 sm::description("number of currently pending foreground read requests"),
-                {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                {storage_proxy_stats::current_scheduling_group_label(), basic_level}).set_skip_when_empty(),
 
         sm::make_queue_length("background_reads", [this] { return reads - foreground_reads; },
                        sm::description("number of currently pending background read requests"),
@@ -2832,11 +2850,11 @@ void storage_proxy_stats::stats::register_stats() {
 
         sm::make_total_operations("read_timeouts", [this]{return read_timeouts.count(); },
                        sm::description("number of read request failed due to a timeout"),
-                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level}).set_skip_when_empty(),
 
         sm::make_total_operations("read_unavailable", [this]{return read_unavailables.count(); },
                        sm::description("number read requests failed due to an \"unavailable\" error"),
-                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level}).set_skip_when_empty(),
 
         sm::make_total_operations("read_rate_limited", [this]{return read_rate_limited_by_replicas.count(); },
                        sm::description("number of read requests which were rejected because rate limit for the partition was reached. rejected_by_coordinator indicates if it was rejected by the coordinator or the replica"),
@@ -2848,101 +2866,101 @@ void storage_proxy_stats::stats::register_stats() {
 
         sm::make_total_operations("range_timeouts", [this]{return range_slice_timeouts.count(); },
                        sm::description("number of range read operations failed due to a timeout"),
-                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level}).set_skip_when_empty(),
 
         sm::make_total_operations("range_unavailable", [this]{return range_slice_unavailables.count(); },
                        sm::description("number of range read operations failed due to an \"unavailable\" error"),
-                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level}).set_skip_when_empty(),
 
         sm::make_total_operations("speculative_digest_reads", speculative_digest_reads,
                        sm::description("number of speculative digest read requests that were sent"),
-                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level}).set_skip_when_empty(),
 
         sm::make_total_operations("speculative_data_reads", speculative_data_reads,
                        sm::description("number of speculative data read requests that were sent"),
-                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level}).set_skip_when_empty(),
 
-        sm::make_summary("cas_read_latency_summary", sm::description("CAS read latency summary"), [this] {return to_metrics_summary(cas_read.summary());})(storage_proxy_stats::current_scheduling_group_label()).set_skip_when_empty(),
-        sm::make_summary("cas_write_latency_summary", sm::description("CAS write latency summary"), [this] {return to_metrics_summary(cas_write.summary());})(storage_proxy_stats::current_scheduling_group_label()).set_skip_when_empty(),
+        sm::make_summary("cas_read_latency_summary", sm::description("CAS read latency summary"), [this] {return to_metrics_summary(cas_read.summary());})(storage_proxy_stats::current_scheduling_group_label())(basic_level)(cas_label).set_skip_when_empty(),
+        sm::make_summary("cas_write_latency_summary", sm::description("CAS write latency summary"), [this] {return to_metrics_summary(cas_write.summary());})(storage_proxy_stats::current_scheduling_group_label())(basic_level)(cas_label).set_skip_when_empty(),
 
         sm::make_histogram("cas_read_latency", sm::description("Transactional read latency histogram"),
-                {storage_proxy_stats::current_scheduling_group_label()},
+                {storage_proxy_stats::current_scheduling_group_label(), cas_label},
                 [this]{ return to_metrics_histogram(cas_read.histogram());}).aggregate({seastar::metrics::shard_label}).set_skip_when_empty(),
 
         sm::make_histogram("cas_write_latency", sm::description("Transactional write latency histogram"),
-                {storage_proxy_stats::current_scheduling_group_label()},
+                {storage_proxy_stats::current_scheduling_group_label(), cas_label},
                 [this]{return to_metrics_histogram(cas_write.histogram());}).aggregate({seastar::metrics::shard_label}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_write_timeouts", [this]{return cas_write_timeouts.count(); },
                        sm::description("number of transactional write request failed due to a timeout"),
-                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level, cas_label}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_write_unavailable", [this]{return cas_write_unavailables.count(); },
                        sm::description("number of transactional write requests failed due to an \"unavailable\" error"),
-                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level, cas_label}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_read_timeouts", [this]{return cas_read_timeouts.count(); },
                        sm::description("number of transactional read request failed due to a timeout"),
-                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level, cas_label}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_read_unavailable", [this]{return cas_read_unavailables.count(); },
                        sm::description("number of transactional read requests failed due to an \"unavailable\" error"),
-                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level, cas_label}).set_skip_when_empty(),
 
 
         sm::make_total_operations("cas_read_unfinished_commit", cas_read_unfinished_commit,
                        sm::description("number of transaction commit attempts that occurred on read"),
-                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level, cas_label}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_write_unfinished_commit", cas_write_unfinished_commit,
                        sm::description("number of transaction commit attempts that occurred on write"),
-                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level, cas_label}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_write_condition_not_met", cas_write_condition_not_met,
                        sm::description("number of transaction preconditions that did not match current values"),
-                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level, cas_label}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_write_timeout_due_to_uncertainty", cas_write_timeout_due_to_uncertainty,
                        sm::description("how many times write timeout was reported because of uncertainty in the result"),
-                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level, cas_label}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_failed_read_round_optimization", cas_failed_read_round_optimization,
                        sm::description("CAS read rounds issued only if previous value is missing on some replica"),
-                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level, cas_label}).set_skip_when_empty(),
 
         sm::make_histogram("cas_read_contention", sm::description("how many contended reads were encountered"),
-                       {storage_proxy_stats::current_scheduling_group_label()},
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level, cas_label},
                        [this]{ return cas_read_contention.get_histogram(1, 8);}).set_skip_when_empty(),
 
         sm::make_histogram("cas_write_contention", sm::description("how many contended writes were encountered"),
-                       {storage_proxy_stats::current_scheduling_group_label()},
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level, cas_label},
                        [this]{ return cas_write_contention.get_histogram(1, 8);}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_prune", cas_prune,
                        sm::description("how many times paxos prune was done after successful cas operation"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level}),
 
         sm::make_total_operations("cas_dropped_prune", cas_coordinator_dropped_prune,
                        sm::description("how many times a coordinator did not perform prune after cas"),
-                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level, cas_label}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_total_operations", cas_total_operations,
                        sm::description("number of total paxos operations executed (reads and writes)"),
-                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level, cas_label}).set_skip_when_empty(),
 
         sm::make_gauge("cas_foreground", cas_foreground,
                         sm::description("how many paxos operations that did not yet produce a result are running"),
-                        {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                        {storage_proxy_stats::current_scheduling_group_label(), basic_level, cas_label}).set_skip_when_empty(),
 
         sm::make_gauge("cas_background", [this] { return cas_total_running - cas_foreground; },
                         sm::description("how many paxos operations are still running after a result was already returned"),
-                        {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                        {storage_proxy_stats::current_scheduling_group_label(), basic_level, cas_label}).set_skip_when_empty(),
     });
 
     new_metrics.add_group(REPLICA_STATS_CATEGORY, {
         sm::make_total_operations("received_counter_updates", received_counter_updates,
                        sm::description("number of counter updates received by this node acting as an update leader"),
-                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+                       {storage_proxy_stats::current_scheduling_group_label(), basic_level}).set_skip_when_empty(),
 
         sm::make_total_operations("received_mutations", received_mutations,
                        sm::description("number of mutations received by a replica Node"),
@@ -3010,7 +3028,7 @@ void storage_proxy_stats::split_stats::register_metrics_local() {
     auto new_metrics = sm::metric_groups();
     new_metrics.add_group(_category, {
         sm::make_counter(_short_description_prefix + sstring("_local_node"), [this] { return _local.val; },
-                       sm::description(_long_description_prefix + "on a local Node"), {storage_proxy_stats::make_scheduling_group_label(_sg), op_type_label(_op_type)}).set_skip_when_empty()
+                       sm::description(_long_description_prefix + "on a local Node"), {storage_proxy_stats::make_scheduling_group_label(_sg), op_type_label(_op_type), basic_level}).set_skip_when_empty()
     });
     _metrics = std::exchange(new_metrics, {});
 }
@@ -3023,7 +3041,7 @@ void storage_proxy_stats::split_stats::register_metrics_for(sstring dc, locator:
     if (auto [ignored, added] = _dc_stats.try_emplace(dc); added) {
         _metrics.add_group(_category, {
             sm::make_counter(_short_description_prefix + sstring("_remote_node"), [this, dc] { return _dc_stats[dc].val; },
-                            sm::description(seastar::format("{} when communicating with external Nodes in another DC", _long_description_prefix)), {storage_proxy_stats::make_scheduling_group_label(_sg), datacenter_label(dc), op_type_label(_op_type)})
+                            sm::description(seastar::format("{} when communicating with external Nodes in another DC", _long_description_prefix)), {storage_proxy_stats::make_scheduling_group_label(_sg), datacenter_label(dc), op_type_label(_op_type), basic_level})
                                 .set_skip_when_empty()
         });
     }
@@ -3105,7 +3123,7 @@ storage_proxy::storage_proxy(distributed<replica::database>& db, storage_proxy::
     namespace sm = seastar::metrics;
     _metrics.add_group(storage_proxy_stats::COORDINATOR_STATS_CATEGORY, {
         sm::make_queue_length("current_throttled_writes", [this] { return _throttled_writes.size(); },
-                       sm::description("number of currently throttled write requests")),
+                       sm::description("number of currently throttled write requests"))(basic_level),
     });
     _metrics.add_group(storage_proxy_stats::REPLICA_STATS_CATEGORY, {
         sm::make_current_bytes("view_update_backlog", [this] { return _max_view_update_backlog.fetch_shard(this_shard_id()).get_current_bytes(); },
@@ -4402,7 +4420,13 @@ future<result<>> storage_proxy::schedule_repair(locator::effective_replication_m
     if (diffs.empty()) {
         return make_ready_future<result<>>(bo::success());
     }
-    return mutate_internal(diffs | std::views::values | std::views::transform([ermp] (auto& v) { return read_repair_mutation{std::move(v), ermp}; }), cl, false, std::move(trace_state), std::move(permit));
+    return mutate_internal(
+            diffs |
+                    std::views::values |
+                    std::views::transform([ermp] (auto& v) { return read_repair_mutation{std::move(v), ermp}; }) |
+                    // The transform above is destructive, materialize into a vector to make the range re-iterable.
+                    std::ranges::to<std::vector<read_repair_mutation>>()
+            , cl, false, std::move(trace_state), std::move(permit));
 }
 
 class abstract_read_resolver {

@@ -15,8 +15,6 @@
 #include "utils/log.hh"
 #include "utils/error_injection.hh"
 
-#include <boost/range/adaptor/map.hpp>
-
 namespace query {
 
 logging::logger qlogger("querier_cache");
@@ -454,7 +452,7 @@ void querier::maybe_log_tombstone_warning(std::string_view what, uint64_t live, 
         qrlogger.log(log_level::warn, rl, "Read {} live {} and {} dead {}/tombstones for {}.{} partition key \"{}\" {} (see tombstone_warn_threshold)",
                       live, what, dead, what, _schema->ks_name(), _schema->cf_name(), _range->start()->value().key()->with_schema(*_schema), (*_range));
     } else {
-        qrlogger.log(log_level::warn, rl, "Read {} live {} and {} dead {}/tombstones for {}.{} <partition-range-scan> {} (see tombstone_warn_threshold)",
+        qrlogger.log(log_level::debug, rl, "Read {} live {} and {} dead {}/tombstones for {}.{} <partition-range-scan> {} (see tombstone_warn_threshold)",
                       live, what, dead, what, _schema->ks_name(), _schema->cf_name(), (*_range));
     }
 }

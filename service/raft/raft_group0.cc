@@ -9,6 +9,7 @@
 #include <source_location>
 #include <fmt/ranges.h>
 
+#include "mutation/async_utils.hh"
 #include "service/raft/group0_fwd.hh"
 #include "service/raft/raft_group0.hh"
 #include "service/raft/raft_rpc.hh"
@@ -27,6 +28,7 @@
 #include "gms/feature_service.hh"
 #include "db/system_keyspace.hh"
 #include "replica/database.hh"
+#include "service/topology_mutation.hh"
 #include "utils/assert.hh"
 #include "utils/error_injection.hh"
 
@@ -490,7 +492,7 @@ utils::observer<bool> raft_group0::observe_leadership(std::function<void(bool)> 
 }
 
 future<> raft_group0::join_group0(std::vector<gms::inet_address> seeds, shared_ptr<service::group0_handshaker> handshaker, service::storage_service& ss, cql3::query_processor& qp, service::migration_manager& mm,
-                                  db::system_keyspace& sys_ks, bool topology_change_enabled) {
+                                  db::system_keyspace& sys_ks, bool topology_change_enabled, const join_node_request_params& params) {
     SCYLLA_ASSERT(this_shard_id() == 0);
     SCYLLA_ASSERT(!joined_group0());
 
@@ -529,11 +531,18 @@ future<> raft_group0::join_group0(std::vector<gms::inet_address> seeds, shared_p
                 // We should start a new group with this node as voter.
                 group0_log.info("Server {} chosen as discovery leader; bootstrapping group 0 from scratch", my_id);
                 initial_configuration.current.emplace(my_addr, true);
+
+                // Initializes system tables for the first group 0 member. Nodes joining group 0 henceforth would apply them via snapshots.
+                if (topology_change_enabled) {
+                    co_await ss.raft_initialize_discovery_leader(params);
+                }
+
                 // Force snapshot transfer from us to subsequently joining servers.
                 // This is important for upgrade and recovery, where the group 0 state machine
                 // (schema tables in particular) is nonempty.
-                // In a fresh cluster this will trigger an empty snapshot transfer which is redundant but correct.
-                // See #14066.
+                // In case of fresh cluster with raft topology enabled, this will trigger a snapshot transfer which propagates initial 
+                // topology state (created in raft_initialize_discovery_leader above). Otherwise, with raft topology disabled, this will 
+                // trigger an empty snapshot transfer.
                 nontrivial_snapshot = true;
             } else {
                 co_await handshaker->pre_server_start(g0_info);
@@ -542,6 +551,11 @@ future<> raft_group0::join_group0(std::vector<gms::inet_address> seeds, shared_p
             utils::get_local_injector().inject("stop_after_sending_join_node_request",
                 [] { std::raise(SIGSTOP); });
 
+            // Populates correct upgrade state value before starting raft server, so that reads always get correct values.
+            if (topology_change_enabled) {
+                co_await ss.initialize_done_topology_upgrade_state();
+            }
+            
             // Bootstrap the initial configuration
             co_await raft_sys_table_storage(qp, group0_id, my_id)
                     .bootstrap(std::move(initial_configuration), nontrivial_snapshot);
@@ -708,7 +722,8 @@ future<> raft_group0::setup_group0_if_exist(db::system_keyspace& sys_ks, service
 
 future<> raft_group0::setup_group0(
         db::system_keyspace& sys_ks, const std::unordered_set<gms::inet_address>& initial_contact_nodes, shared_ptr<group0_handshaker> handshaker,
-        std::optional<replace_info> replace_info, service::storage_service& ss, cql3::query_processor& qp, service::migration_manager& mm, bool topology_change_enabled) {
+        std::optional<replace_info> replace_info, service::storage_service& ss, cql3::query_processor& qp, service::migration_manager& mm, bool topology_change_enabled,
+        const join_node_request_params& params) {
     if (!co_await use_raft()) {
         co_return;
     }
@@ -721,7 +736,7 @@ future<> raft_group0::setup_group0(
     std::vector<gms::inet_address> seeds(initial_contact_nodes.begin(), initial_contact_nodes.end());
 
     group0_log.info("setup_group0: joining group 0...");
-    co_await join_group0(std::move(seeds), std::move(handshaker), ss, qp, mm, sys_ks, topology_change_enabled);
+    co_await join_group0(std::move(seeds), std::move(handshaker), ss, qp, mm, sys_ks, topology_change_enabled, params);
     group0_log.info("setup_group0: successfully joined group 0.");
 
     // Start group 0 leadership monitor fiber.
@@ -836,38 +851,48 @@ bool raft_group0::is_member(raft::server_id id, bool include_voters_only) {
 }
 
 future<> raft_group0::become_nonvoter(abort_source& as, std::optional<raft_timeout> timeout) {
-    if (!(co_await raft_upgrade_complete())) {
-        on_internal_error(group0_log, "called become_nonvoter before Raft upgrade finished");
-    }
-
-    auto my_id = load_my_id();
-    group0_log.info("becoming a non-voter (my id = {})...", my_id);
-
-    co_await modify_raft_voter_status({my_id}, can_vote::no, as, timeout);
-    group0_log.info("became a non-voter.", my_id);
+    co_return co_await modify_voters({}, {load_my_id()}, as, timeout);
 }
 
-future<> raft_group0::set_voter_status(raft::server_id node, can_vote can_vote, abort_source& as, std::optional<raft_timeout> timeout) {
-    co_return co_await set_voters_status({node}, can_vote, as, timeout);
+future<> raft_group0::make_nonvoter(raft::server_id node, abort_source& as, std::optional<raft_timeout> timeout) {
+    co_return co_await modify_voters({}, {node}, as, timeout);
 }
 
-future<> raft_group0::set_voters_status(
-        const std::unordered_set<raft::server_id>& nodes, can_vote can_vote, abort_source& as, std::optional<raft_timeout> timeout) {
-    if (!(co_await raft_upgrade_complete())) {
-        on_internal_error(group0_log, "called set_voter_status before Raft upgrade finished");
-    }
-
-    if (nodes.empty()) {
+future<> raft_group0::modify_voters(const std::unordered_set<raft::server_id>& voters_add, const std::unordered_set<raft::server_id>& voters_del,
+        abort_source& as, std::optional<raft_timeout> timeout) {
+    if (voters_add.empty() && voters_del.empty()) {
         co_return;
     }
 
-    const std::string_view status_str = can_vote ? "voters" : "non-voters";
+    // Ensure that we're not trying to add and remove the same node.
+    auto calculate_intersection = [](const auto& nodes_add, const auto& nodes_del) {
+        return nodes_add | std::views::filter([&nodes_del](auto id) {
+            return nodes_del.contains(id);
+        });
+    };
+    if (!calculate_intersection(voters_add, voters_del).empty()) {
+        on_internal_error(group0_log, "called modify_voters with the same node in both voters and non-voters sets");
+    }
 
-    group0_log.info("making servers {} {}...", nodes, status_str);
+    if (!(co_await raft_upgrade_complete())) {
+        on_internal_error(group0_log, "called modify_voters before Raft upgrade finished");
+    }
 
-    co_await modify_raft_voter_status(nodes, can_vote, as, timeout);
+    if (!voters_add.empty()) {
+        group0_log.info("making servers {} voters ...", voters_add);
+    }
+    if (!voters_del.empty()) {
+        group0_log.info("making servers {} non-voters ...", voters_del);
+    }
 
-    group0_log.info("servers {} are now {}.", nodes, status_str);
+    co_await modify_raft_voter_status(voters_add, voters_del, as, timeout);
+
+    if (!voters_add.empty()) {
+        group0_log.info("servers {} are now voters.", voters_add);
+    }
+    if (!voters_del.empty()) {
+        group0_log.info("servers {} are now non-voters.", voters_del);
+    }
 }
 
 future<> raft_group0::leave_group0() {
@@ -953,28 +978,32 @@ future<bool> raft_group0::wait_for_raft() {
     co_return true;
 }
 
-future<> raft_group0::modify_raft_voter_status(
-        const std::unordered_set<raft::server_id>& ids, can_vote can_vote, abort_source& as, std::optional<raft_timeout> timeout) {
-    co_await run_op_with_retry(as, [this, &ids, timeout, can_vote, &as]() -> future<operation_result> {
+future<> raft_group0::modify_raft_voter_status(const std::unordered_set<raft::server_id>& voters_add, const std::unordered_set<raft::server_id>& voters_del,
+        abort_source& as, std::optional<raft_timeout> timeout) {
+    return run_op_with_retry(as, [this, &voters_add, &voters_del, timeout, &as] -> future<operation_result> {
         std::vector<raft::config_member> add;
-        add.reserve(ids.size());
-        std::transform(ids.begin(), ids.end(), std::back_inserter(add), [can_vote](raft::server_id id) {
-            return raft::config_member{{id, {}}, static_cast<bool>(can_vote)};
+        add.reserve(voters_add.size() + voters_del.size());
+
+        std::transform(voters_add.begin(), voters_add.end(), std::back_inserter(add), [](raft::server_id id) {
+            return raft::config_member{{id, {}}, true};
+        });
+
+        std::transform(voters_del.begin(), voters_del.end(), std::back_inserter(add), [](raft::server_id id) {
+            return raft::config_member{{id, {}}, false};
         });
 
         try {
             co_await _raft_gr.group0_with_timeouts().modify_config(std::move(add), {}, &as, timeout);
         } catch (const raft::commit_status_unknown& e) {
-            group0_log.info("modify_raft_voter_config({}): modify_config returned \"{}\", retrying", ids, e);
+            group0_log.info("modify_raft_voter_status({}, {}): modify_config returned \"{}\", retrying", voters_add, voters_del, e);
             co_return operation_result::failure;
         }
         co_return operation_result::success;
     }, "modify_raft_voter_status->modify_config");
-    co_return;
 }
 
 future<> raft_group0::remove_from_raft_config(raft::server_id id) {
-    co_await run_op_with_retry(_abort_source, [this, id]() -> future<operation_result> {
+    return run_op_with_retry(_abort_source, [this, id] -> future<operation_result> {
         try {
             co_await _raft_gr.group0_with_timeouts().modify_config({}, {id}, &_abort_source, raft_timeout{});
         } catch (const raft::commit_status_unknown& e) {
@@ -983,7 +1012,6 @@ future<> raft_group0::remove_from_raft_config(raft::server_id id) {
         }
         co_return operation_result::success;
     }, "remove_from_raft_config->modify_config");
-    co_return;
 }
 
 bool raft_group0::joined_group0() const {
@@ -1684,7 +1712,7 @@ future<> raft_group0::do_upgrade_to_group0(group0_upgrade_state start_state, ser
     if (!joined_group0()) {
         upgrade_log.info("Joining group 0...");
         auto handshaker = make_legacy_handshaker(can_vote::yes); // Voter
-        co_await join_group0(co_await _sys_ks.load_peers(), std::move(handshaker), ss, qp, mm, _sys_ks, topology_change_enabled);
+        co_await join_group0(co_await _sys_ks.load_peers(), std::move(handshaker), ss, qp, mm, _sys_ks, topology_change_enabled, join_node_request_params{});
     } else {
         upgrade_log.info(
             "We're already a member of group 0."

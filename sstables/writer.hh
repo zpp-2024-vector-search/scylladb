@@ -10,7 +10,6 @@
 
 #include <seastar/core/iostream.hh>
 #include <seastar/core/fstream.hh>
-#include <boost/range/numeric.hpp>
 #include "sstables/types.hh"
 #include "checksum_utils.hh"
 #include "vint-serialization.hh"
@@ -18,12 +17,6 @@
 #include "version.hh"
 #include "counters.hh"
 #include "dht/i_partitioner_fwd.hh"
-
-namespace db {
-
-class config;
-
-} // namespace db
 
 namespace sstables {
 
@@ -547,10 +540,6 @@ void write_counter_value(counter_cell_view ccv, W& out, sstable_version_types v,
 
 void maybe_add_summary_entry(summary&, const dht::token&, bytes_view key, uint64_t data_offset,
     uint64_t index_offset, index_sampling_state&);
-
-// Get the currently loaded configuration, or the default configuration in
-// case none has been loaded (this happens, for example, in unit tests).
-const db::config& get_config();
 
 void prepare_summary(summary& s, uint64_t expected_partition_count, uint32_t min_index_interval);
 

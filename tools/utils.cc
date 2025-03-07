@@ -61,7 +61,7 @@ const operation* get_selected_operation(int& ac, char**& av, const std::vector<o
     }
     opts.add(boost::make_shared<bpo::option_description>("operation", bpo::value<sstring>(), "Operation"));
     pos_opts.add("operation", 1);
-    opts.add(boost::make_shared<bpo::option_description>("operation_options", bpo::value<std::vector<sstring>>(), "Operation specific options"));
+    opts.add(boost::make_shared<bpo::option_description>("operation_options", bpo::value<std::vector<std::string>>(), "Operation specific options"));
     pos_opts.add("operation_options", -1);
 
     if (global_options) {
@@ -140,6 +140,10 @@ const operation* get_selected_operation(int& ac, char**& av, const std::vector<o
 // Set ERROR as the default log level, except for the logger \p logger_name, which
 // is configured with INFO level.
 void configure_tool_mode(app_template::seastar_options& opts, const sstring& logger_name) {
+    // Disable handling of SIGINT/SIGTERM by seastar, allow the tool to be
+    // interrupted by way of not handling these signals.
+    opts.auto_handle_sigint_sigterm = false;
+
     opts.reactor_opts.blocked_reactor_notify_ms.set_value(60000);
     opts.reactor_opts.overprovisioned.set_value();
     opts.reactor_opts.idle_poll_time_us.set_value(0);
@@ -237,6 +241,7 @@ int tool_app_template::run_async(int argc, char** argv, noncopyable_function<int
     if (_cfg.db_cfg_ext) {
         auto init = app.get_options_description().add_options();
         configurable::append_all(*_cfg.db_cfg_ext->db_cfg, init);
+        _cfg.db_cfg_ext->db_cfg->add_all_default_extensions();
     }
 
     return app.run(argc, argv, [this, &main_func, &app, found_op] {

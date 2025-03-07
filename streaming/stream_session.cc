@@ -19,12 +19,12 @@
 #include "dht/auto_refreshing_sharder.hh"
 #include <seastar/core/sleep.hh>
 #include <seastar/core/thread.hh>
+#include "streaming/stream_blob.hh"
 #include "streaming/stream_session_state.hh"
 #include "service/migration_manager.hh"
 #include "mutation_writer/multishard_writer.hh"
 #include "sstables/sstable_set.hh"
 #include "db/view/view_update_checks.hh"
-#include <boost/range/adaptor/map.hpp>
 #include "replica/database.hh"
 #include "streaming/stream_mutation_fragments_cmd.hh"
 #include "consumer.hh"
@@ -127,10 +127,6 @@ void stream_manager::init_messaging_service_handler(abort_source& as) {
         auto reason = reason_opt ? *reason_opt: stream_reason::unspecified;
         service::frozen_topology_guard topo_guard = session.value_or(service::default_session_id);
         sslog.trace("Got stream_mutation_fragments from {} reason {}, session {}", from, int(reason), session);
-        if (!_view_builder.local_is_initialized()) {
-            return make_exception_future<rpc::sink<int>>(std::runtime_error(format("Node {} is not fully initialized for streaming, try again later",
-                    _db.local().get_token_metadata().get_topology().my_address())));
-        }
         return _mm.local().get_schema_for_write(schema_id, src, cpu_id, _ms.local(), as).then([this, from, estimated_partitions, plan_id, cf_id, source, reason, topo_guard, &as] (schema_ptr s) mutable {
             auto permit = _db.local().get_reader_concurrency_semaphore().make_tracking_only_permit(s, "stream-session", db::no_timeout, {});
             struct stream_mutation_fragments_cmd_status {
@@ -184,6 +180,10 @@ void stream_manager::init_messaging_service_handler(abort_source& as) {
                             }
                             sslog.info("stream_mutation_fragments: released");
                         }).then([mf = std::move(mf)] () mutable {
+                            if (utils::get_local_injector().is_enabled("stream_mutation_fragments_rx_error")) {
+                                sslog.info("stream_mutation_fragments_rx_error: throw");
+                                throw std::runtime_error("stream_mutation_fragments_rx_error");
+                            }
                             return mutation_fragment_opt(std::move(mf));
                         });
                     } else {
@@ -213,7 +213,9 @@ void stream_manager::init_messaging_service_handler(abort_source& as) {
                 make_generating_reader_v1(s, permit, std::move(get_next_mutation_fragment)),
                 make_streaming_consumer(estimated_partitions, reason, topo_guard),
                 std::move(op)
-            ).then_wrapped([s, plan_id, from, sink, estimated_partitions, log_done, sh_ptr = std::move(sharder_ptr)] (future<uint64_t> f) mutable {
+            ).then_wrapped([this, s, plan_id_ = plan_id, from, sink_ = sink, estimated_partitions, log_done, sh_ptr = std::move(sharder_ptr)] (future<uint64_t> f) mutable -> future<> {
+                auto sink = sink_;
+                auto plan_id = plan_id_;
                 int32_t status = 0;
                 uint64_t received_partitions = 0;
                 if (f.failed()) {
@@ -237,7 +239,16 @@ void stream_manager::init_messaging_service_handler(abort_source& as) {
                     sslog.info("[Stream #{}] Write to sstable for ks={}, cf={}, estimated_partitions={}, received_partitions={}",
                             plan_id, s->ks_name(), s->cf_name(), estimated_partitions, received_partitions);
                 }
-                return sink(status).finally([sink] () mutable {
+                if (status == -1) {
+                    try {
+                        if (!utils::get_local_injector().is_enabled("stream_mutation_fragments_skip_fail_stream_plan")) {
+                            co_await fail_stream_plan(plan_id);
+                        }
+                    } catch (...) {
+                        sslog.warn("[Stream #{}] Failed to abort the stream plan: {}", plan_id, std::current_exception());
+                    }
+                }
+                co_await sink(status).finally([sink] () mutable {
                     return sink.close();
                 });
             }).handle_exception([s, plan_id, from, sink] (std::exception_ptr ep) {
@@ -278,12 +289,21 @@ void stream_manager::init_messaging_service_handler(abort_source& as) {
             return make_ready_future<>();
         }
     });
+    ms.register_stream_blob([this] (const rpc::client_info& cinfo, streaming::stream_blob_meta meta, rpc::source<streaming::stream_blob_cmd_data> source) {
+        auto from = netw::messaging_service::get_source(cinfo).addr;
+        auto sink = _ms.local().make_sink_for_stream_blob(source);
+        (void)stream_blob_handler(_db.local(), _ms.local(), from, meta, sink, source).handle_exception([ms = _ms.local().shared_from_this()] (std::exception_ptr eptr) {
+            sslog.warn("Failed to run stream blob handler: {}", eptr);
+        });
+        return make_ready_future<rpc::sink<streaming::stream_blob_cmd_data>>(sink);
+    });
 }
 
 future<> stream_manager::uninit_messaging_service_handler() {
     auto& ms = _ms.local();
     return when_all_succeed(
         ser::streaming_rpc_verbs::unregister(&ms),
+        ms.unregister_stream_blob(),
         ms.unregister_stream_mutation_fragments()).discard_result();
 }
 
@@ -338,6 +358,10 @@ future<> stream_session::on_initialization_complete() {
 }
 
 void stream_session::received_failed_complete_message() {
+    if (utils::get_local_injector().is_enabled("stream_session_ignore_failed_message")) {
+        sslog.info("[Stream #{}] Ignored failed complete message, peer={}", plan_id(), peer);
+        return;
+    }
     sslog.info("[Stream #{}] Received failed complete message, peer={}", plan_id(), peer);
     _received_failed_complete_message = true;
     close_session(stream_session_state::FAILED);

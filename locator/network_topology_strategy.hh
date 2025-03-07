@@ -29,7 +29,7 @@ public:
         return _rep_factor;
     }
 
-    size_t get_replication_factor(const sstring& dc) const {
+    size_t get_replication_factor(const sstring& dc) const override {
         auto dc_factor = _dc_rep_factor.find(dc);
         return (dc_factor == _dc_rep_factor.end()) ? 0 : dc_factor->second;
     }
@@ -46,7 +46,7 @@ public:
 
 public: // tablet_aware_replication_strategy
     virtual effective_replication_map_ptr make_replication_map(table_id, token_metadata_ptr) const override;
-    virtual future<tablet_map> allocate_tablets_for_new_table(schema_ptr, token_metadata_ptr, unsigned initial_scale) const override;
+    virtual future<tablet_map> allocate_tablets_for_new_table(schema_ptr, token_metadata_ptr, size_t tablet_count) const override;
     virtual future<tablet_map> reallocate_tablets(schema_ptr, token_metadata_ptr, tablet_map cur_tablets) const override;
 protected:
     /**
@@ -56,9 +56,7 @@ protected:
     virtual future<host_id_set> calculate_natural_endpoints(
         const token& search_token, const token_metadata& tm) const override;
 
-    virtual void validate_options(const gms::feature_service&) const override;
-
-    virtual std::optional<std::unordered_set<sstring>> recognized_options(const topology&) const override;
+    virtual void validate_options(const gms::feature_service&, const locator::topology& topology) const override;
 
 private:
     future<tablet_replica_set> reallocate_tablets(schema_ptr, token_metadata_ptr, load_sketch&, const tablet_map& cur_tablets, tablet_id tb) const;

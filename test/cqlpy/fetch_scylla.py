@@ -16,6 +16,7 @@
 #   * 2023.1 (latest in this branch, Enterprise release)
 
 import boto3
+import botocore
 import sys
 import os
 import subprocess
@@ -65,7 +66,9 @@ def download_scylla(release, dir):
     major = f'{v[0]}.{v[1]}'
     bucket = f'downloads.scylladb.com'
     scylla_arch_string = '.' + scylla_arch + '.'
-    if int(v[0]) >= 2023: # Enterprise release (new organization)
+    if int(v[0]) >= 2025: # New single release stream (no separate Enterprise)
+        prefix = f'downloads/scylla/relocatable/scylladb-{major}/scylla-{release}'
+    elif int(v[0]) >= 2023: # Enterprise release (new organization)
         prefix = f'downloads/scylla-enterprise/relocatable/scylladb-{major}/scylla-enterprise-{release}'
     elif int(v[0]) > 2000: # Enterprise release (old organization)
         prefix = f'downloads/scylla-enterprise/relocatable/scylladb-{major}/scylla-enterprise-{scylla_arch}-package-{release}'
@@ -81,7 +84,11 @@ def download_scylla(release, dir):
     # This prefix has many different packages belonging to all releases in
     # the same major version. We need to look only for those matching the
     # minor version, and take the highest minor number.
-    s3 = boto3.resource('s3')
+
+    # We set region_name and use unsigned (anonymous) requests to avoid
+    # the need of the user to have to set up a valid $HOME/.aws/config
+    # or $HOME/.aws/credentails.
+    s3 = boto3.resource('s3', region_name='us-east-1', config=botocore.client.Config(signature_version=botocore.UNSIGNED))
     bucket = s3.Bucket(bucket)
     matches = bucket.objects.filter(Prefix=prefix)
     candidates = [o.key.removeprefix(prefix) for o in matches if scylla_arch_string in o.key]

@@ -33,8 +33,6 @@
 #include <seastar/core/metrics.hh>
 #include "sstables/sstables.hh"
 #include "sstables/sstables_manager.hh"
-#include <boost/range/adaptor/map.hpp>
-#include <boost/range/algorithm/min_element.hpp>
 #include <boost/container/static_vector.hpp>
 #include "mutation/frozen_mutation.hh"
 #include "mutation/async_utils.hh"
@@ -74,6 +72,7 @@
 #include "replica/exceptions.hh"
 #include "readers/multi_range.hh"
 #include "readers/multishard.hh"
+#include "utils/labels.hh"
 
 #include <algorithm>
 
@@ -182,7 +181,7 @@ phased_barrier_top_10_counts(const database::tables_metadata& tables_metadata, s
 
         // If we are here, min_element->first < count
         *min_element = {count, table_list({table.get()})};
-        min_element = &*boost::min_element(res, less);
+        min_element = &*std::ranges::min_element(res, less);
     });
 
     std::ranges::sort(res, less);
@@ -222,7 +221,7 @@ void database::setup_scylla_memory_diagnostics_producer() {
 
         writeln("  Read Concurrency Semaphores:\n");
 
-        static auto semaphore_dump = [&writeln] (const sstring& name, const reader_concurrency_semaphore& sem) {
+        auto semaphore_dump = [&writeln] (const sstring& name, const reader_concurrency_semaphore& sem) {
             const auto initial_res = sem.initial_resources();
             const auto available_res = sem.available_resources();
             if (sem.is_unlimited()) {
@@ -245,10 +244,10 @@ void database::setup_scylla_memory_diagnostics_producer() {
         semaphore_dump("streaming", _streaming_concurrency_sem);
         semaphore_dump("system", _system_read_concurrency_sem);
         semaphore_dump("compaction", _compaction_concurrency_sem);
-        _reader_concurrency_semaphores_group.foreach_semaphore([] (scheduling_group sg, reader_concurrency_semaphore& sem) {
+        _reader_concurrency_semaphores_group.foreach_semaphore([&semaphore_dump] (scheduling_group sg, reader_concurrency_semaphore& sem) {
              semaphore_dump(sg.name(), sem);
         });
-        _view_update_read_concurrency_semaphores_group.foreach_semaphore([] (scheduling_group sg, reader_concurrency_semaphore& sem) {
+        _view_update_read_concurrency_semaphores_group.foreach_semaphore([&semaphore_dump] (scheduling_group sg, reader_concurrency_semaphore& sem) {
              semaphore_dump(sg.name(), sem);
         });
 
@@ -560,11 +559,11 @@ database::setup_metrics() {
         sm::make_gauge("requests_blocked_memory_current", [this] { return _dirty_memory_manager.region_group().blocked_requests(); },
                        sm::description(
                            seastar::format("Holds the current number of requests blocked due to reaching the memory quota ({}B). "
-                                           "Non-zero value indicates that our bottleneck is memory and more specifically - the memory quota allocated for the \"database\" component.", _dirty_memory_manager.throttle_threshold()))),
+                                           "Non-zero value indicates that our bottleneck is memory and more specifically - the memory quota allocated for the \"database\" component.", _dirty_memory_manager.throttle_threshold())))(basic_level),
 
         sm::make_counter("requests_blocked_memory", [this] { return _dirty_memory_manager.region_group().blocked_requests_counter(); },
                        sm::description(seastar::format("Holds the current number of requests blocked due to reaching the memory quota ({}B). "
-                                       "Non-zero value indicates that our bottleneck is memory and more specifically - the memory quota allocated for the \"database\" component.", _dirty_memory_manager.throttle_threshold()))),
+                                       "Non-zero value indicates that our bottleneck is memory and more specifically - the memory quota allocated for the \"database\" component.", _dirty_memory_manager.throttle_threshold())))(basic_level),
 
         sm::make_counter("clustering_filter_count", _cf_stats.clustering_filter_count,
                        sm::description("Counts bloom filter invocations.")),
@@ -581,30 +580,29 @@ database::setup_metrics() {
                                        "High value indicates that bloom filter is not very efficient and still have to access a lot of sstables to get data.")),
 
         sm::make_counter("dropped_view_updates", _cf_stats.dropped_view_updates,
-                       sm::description("Counts the number of view updates that have been dropped due to cluster overload. ")),
+                       sm::description("Counts the number of view updates that have been dropped due to cluster overload. "))(basic_level),
 
        sm::make_counter("view_building_paused", _cf_stats.view_building_paused,
                       sm::description("Counts the number of times view building process was paused (e.g. due to node unavailability). ")),
 
         sm::make_counter("total_writes", _stats->total_writes,
-                       sm::description("Counts the total number of successful write operations performed by this shard.")),
+                       sm::description("Counts the total number of successful write operations performed by this shard."))(basic_level),
 
         sm::make_counter("total_writes_failed", _stats->total_writes_failed,
                        sm::description("Counts the total number of failed write operations. "
-                                       "A sum of this value plus total_writes represents a total amount of writes attempted on this shard.")),
+                                       "A sum of this value plus total_writes represents a total amount of writes attempted on this shard."))(basic_level),
 
         sm::make_counter("total_writes_timedout", _stats->total_writes_timedout,
-                       sm::description("Counts write operations failed due to a timeout. A positive value is a sign of storage being overloaded.")),
+                       sm::description("Counts write operations failed due to a timeout. A positive value is a sign of storage being overloaded."))(basic_level),
 
         sm::make_counter("total_writes_rate_limited", _stats->total_writes_rate_limited,
-                       sm::description("Counts write operations which were rejected on the replica side because the per-partition limit was reached.")),
-
+                       sm::description("Counts write operations which were rejected on the replica side because the per-partition limit was reached."))(basic_level),
 
         sm::make_counter("total_reads_rate_limited", _stats->total_reads_rate_limited,
                        sm::description("Counts read operations which were rejected on the replica side because the per-partition limit was reached.")),
 
         sm::make_current_bytes("view_update_backlog", [this] { return get_view_update_backlog().get_current_bytes(); },
-                       sm::description("Holds the current size in bytes of the pending view updates for all tables")),
+                       sm::description("Holds the current size in bytes of the pending view updates for all tables"))(basic_level),
 
         sm::make_counter("querier_cache_lookups", _querier_cache.get_stats().lookups,
                        sm::description("Counts querier cache lookups (paging queries)")),
@@ -664,10 +662,10 @@ database::setup_metrics() {
                 "Large partitions have performance impact and should be avoided, check the documentation for details.")),
 
         sm::make_total_operations("total_view_updates_pushed_local", _cf_stats.total_view_updates_pushed_local,
-                sm::description("Total number of view updates generated for tables and applied locally.")),
+                sm::description("Total number of view updates generated for tables and applied locally."))(basic_level),
 
         sm::make_total_operations("total_view_updates_pushed_remote", _cf_stats.total_view_updates_pushed_remote,
-                sm::description("Total number of view updates generated for tables and sent to remote replicas.")),
+                sm::description("Total number of view updates generated for tables and sent to remote replicas."))(basic_level),
 
         sm::make_total_operations("total_view_updates_failed_local", _cf_stats.total_view_updates_failed_local,
                 sm::description("Total number of view updates generated for tables and failed to be applied locally.")),
@@ -677,11 +675,14 @@ database::setup_metrics() {
 
         sm::make_total_operations("total_view_updates_on_wrong_node", _cf_stats.total_view_updates_on_wrong_node,
                 sm::description("Total number of view updates which are computed on the wrong node.")).set_skip_when_empty(),
+
+        sm::make_total_operations("total_view_updates_failed_pairing", _cf_stats.total_view_updates_failed_pairing,
+                sm::description("Total number of view updates for which we failed base/view pairing.")).set_skip_when_empty(),
     });
     if (this_shard_id() == 0) {
         _metrics.add_group("database", {
                 sm::make_counter("schema_changed", _schema_change_count,
-                        sm::description("The number of times the schema changed")),
+                        sm::description("The number of times the schema changed"))(basic_level),
         });
     }
 }
@@ -964,7 +965,6 @@ future<> database::add_column_family(keyspace& ks, schema_ptr schema, column_fam
         }
     }
     schema = local_schema_registry().learn(schema);
-    schema->registry_entry()->mark_synced();
     auto&& rs = ks.get_replication_strategy();
     locator::effective_replication_map_ptr erm;
     if (auto pt_rs = rs.maybe_as_per_table()) {
@@ -996,6 +996,8 @@ future<> database::add_column_family(keyspace& ks, schema_ptr schema, column_fam
         co_await cf->stop();
         co_await coroutine::return_exception_ptr(f.get_exception());
     }
+    // Table must be added before entry is marked synced.
+    schema->registry_entry()->mark_synced();
 }
 
 future<> database::add_column_family_and_make_directory(schema_ptr schema, is_new_cf is_new) {
@@ -1374,17 +1376,7 @@ std::vector<view_ptr> database::get_views() const {
 }
 
 future<> database::create_in_memory_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm, locator::effective_replication_map_factory& erm_factory, system_keyspace system) {
-    auto kscfg = make_keyspace_config(*ksm);
-    if (system == system_keyspace::yes) {
-        kscfg.enable_disk_reads = kscfg.enable_disk_writes = kscfg.enable_commitlog = !_cfg.volatile_system_keyspace_for_testing();
-        kscfg.enable_cache = _cfg.enable_cache();
-        // don't make system keyspace writes wait for user writes (if under pressure)
-        kscfg.dirty_memory_manager = &_system_dirty_memory_manager;
-    }
-    if (extensions().is_extension_internal_keyspace(ksm->name())) {
-        // don't make internal keyspaces write wait for user writes (if under pressure), and also to avoid possible deadlocks.
-        kscfg.dirty_memory_manager = &_system_dirty_memory_manager;
-    }
+    auto kscfg = make_keyspace_config(*ksm, system);
     keyspace ks(ksm, std::move(kscfg), erm_factory);
     co_await ks.create_replication_strategy(get_shared_token_metadata());
     _keyspaces.emplace(ksm->name(), std::move(ks));
@@ -1553,7 +1545,9 @@ database::query(schema_ptr query_schema, const query::read_command& cmd, query::
             querier_opt->permit().set_trace_state(trace_state);
             f = co_await coroutine::as_future(semaphore.with_ready_permit(querier_opt->permit(), read_func));
         } else {
-            f = co_await coroutine::as_future(semaphore.with_permit(query_schema, "data-query", cf.estimate_read_memory_cost(), timeout, trace_state, read_func));
+            reader_permit_opt permit_holder;
+            f = co_await coroutine::as_future(semaphore.with_permit(query_schema, "data-query", cf.estimate_read_memory_cost(), timeout,
+                        trace_state, permit_holder, read_func));
         }
 
         if (!f.failed()) {
@@ -1615,7 +1609,9 @@ database::query_mutations(schema_ptr query_schema, const query::read_command& cm
             querier_opt->permit().set_trace_state(trace_state);
             f = co_await coroutine::as_future(semaphore.with_ready_permit(querier_opt->permit(), read_func));
         } else {
-            f = co_await coroutine::as_future(semaphore.with_permit(query_schema, "mutation-query", cf.estimate_read_memory_cost(), timeout, trace_state, read_func));
+            reader_permit_opt permit_holder;
+            f = co_await coroutine::as_future(semaphore.with_permit(query_schema, "mutation-query", cf.estimate_read_memory_cost(), timeout,
+                        trace_state, permit_holder, read_func));
         }
 
         if (!f.failed()) {
@@ -2100,14 +2096,16 @@ future<> database::apply_hint(schema_ptr s, const frozen_mutation& m, tracing::t
 }
 
 keyspace::config
-database::make_keyspace_config(const keyspace_metadata& ksm) {
+database::make_keyspace_config(const keyspace_metadata& ksm, system_keyspace is_system) {
     keyspace::config cfg;
-    if (_cfg.data_file_directories().size() > 0) {
+    if (is_system == system_keyspace::yes) {
+        cfg.enable_disk_reads = cfg.enable_disk_writes = cfg.enable_commitlog = !_cfg.volatile_system_keyspace_for_testing();
+        cfg.enable_cache = _cfg.enable_cache();
+    } else if (_cfg.data_file_directories().size() > 0) {
         cfg.enable_disk_writes = !_cfg.enable_in_memory_data_store();
         cfg.enable_disk_reads = true; // we always read from disk
         cfg.enable_commitlog = _cfg.enable_commitlog() && !_cfg.enable_in_memory_data_store();
         cfg.enable_cache = _cfg.enable_cache();
-
     } else {
         cfg.enable_disk_writes = false;
         cfg.enable_disk_reads = false;
@@ -2116,7 +2114,12 @@ database::make_keyspace_config(const keyspace_metadata& ksm) {
     }
     cfg.enable_dangerous_direct_import_of_cassandra_counters = _cfg.enable_dangerous_direct_import_of_cassandra_counters();
     cfg.compaction_enforce_min_threshold = _cfg.compaction_enforce_min_threshold;
-    cfg.dirty_memory_manager = &_dirty_memory_manager;
+    // don't make system or internal keyspace writes wait for user writes (if under pressure)
+    if (is_system || extensions().is_extension_internal_keyspace(ksm.name())) {
+        cfg.dirty_memory_manager = &_system_dirty_memory_manager;
+    } else {
+        cfg.dirty_memory_manager = &_dirty_memory_manager;
+    }
     cfg.streaming_read_concurrency_semaphore = &_streaming_concurrency_sem;
     cfg.compaction_concurrency_semaphore = &_compaction_concurrency_sem;
     cfg.cf_stats = &_cf_stats;
@@ -2556,6 +2559,12 @@ future<> database::truncate_table_on_all_shards(sharded<database>& sharded_db, s
             co_return make_foreign(std::move(st));
         });
     });
+
+    co_await utils::get_local_injector().inject("truncate_compaction_disabled_wait", [] (auto& handler) -> future<> {
+        dblog.info("truncate_compaction_disabled_wait: wait");
+        co_await handler.wait_for_message(std::chrono::steady_clock::now() + std::chrono::minutes{5});
+        dblog.info("truncate_compaction_disabled_wait: done");
+    }, false);
 
     const auto should_flush = with_snapshot && cf.can_flush();
     dblog.trace("{} {}.{} and views on all shards", should_flush ? "Flushing" : "Clearing", s->ks_name(), s->cf_name());

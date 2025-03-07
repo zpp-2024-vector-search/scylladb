@@ -12,7 +12,6 @@
 
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/trim_all.hpp>
-#include <boost/any.hpp>
 #include <boost/program_options.hpp>
 #include <yaml-cpp/yaml.h>
 
@@ -20,6 +19,7 @@
 
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/format.hh>
+#include <seastar/core/sstring.hh>
 #include <seastar/json/json_elements.hh>
 #include <seastar/util/log.hh>
 #include <seastar/util/log-cli.hh>
@@ -28,6 +28,7 @@
 #include "cdc/cdc_extension.hh"
 #include "tombstone_gc_extension.hh"
 #include "db/per_partition_rate_limit_extension.hh"
+#include "db/paxos_grace_seconds_extension.hh"
 #include "db/tags/extension.hh"
 #include "config.hh"
 #include "extensions.hh"
@@ -113,6 +114,12 @@ config_from_string(std::string_view value) {
     } else {
         throw boost::bad_lexical_cast(typeid(std::string_view), typeid(bool));
     }
+}
+
+template <>
+sstring
+config_from_string(std::string_view value) {
+    return sstring(value);
 }
 
 template <>
@@ -760,6 +767,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "Throttles streaming I/O to the specified total throughput (in MiBs/s) across the entire system. Streaming I/O includes the one performed by repair and both RBNO and legacy topology operations such as adding or removing a node. Setting the value to 0 disables stream throttling.")
     , stream_plan_ranges_fraction(this, "stream_plan_ranges_fraction", liveness::LiveUpdate, value_status::Used, 0.1,
         "Specify the fraction of ranges to stream in a single stream plan. Value is between 0 and 1.")
+    , enable_file_stream(this, "enable_file_stream", liveness::LiveUpdate, value_status::Used, true, "Set true to use file based stream for tablet instead of mutation based stream")
     , trickle_fsync(this, "trickle_fsync", value_status::Unused, false,
         "When doing sequential writing, enabling this option tells fsync to force the operating system to flush the dirty buffers at a set interval trickle_fsync_interval_in_kb. Enable this parameter to avoid sudden dirty buffer flushing from impacting read latencies. Recommended to use on SSDs, but not on HDDs.")
     , trickle_fsync_interval_in_kb(this, "trickle_fsync_interval_in_kb", value_status::Unused, 10240,
@@ -846,7 +854,8 @@ db::config::config(std::shared_ptr<db::extensions> exts)
       Related information: Cassandra anti-patterns: Queues and queue-like datasets.
     */
     , tombstone_warn_threshold(this, "tombstone_warn_threshold", value_status::Used, 1000,
-        "The maximum number of tombstones a query can scan before warning.")
+        "The maximum number of tombstones a query can scan before warning. Tombstone warnings are only logged for single-partition queries."
+        " Tombstone logs for range-scans are logged with debug level (querier logger), as it is normal for range-scans to go through many tombstones.")
     , tombstone_failure_threshold(this, "tombstone_failure_threshold", value_status::Unused, 100000,
         "The maximum number of tombstones a query can scan before aborting.")
     , query_tombstone_page_limit(this, "query_tombstone_page_limit", liveness::LiveUpdate, value_status::Used, 10000,
@@ -896,9 +905,10 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "Sets the receiving socket buffer size in bytes for inter-node calls.")
     , internode_compression(this, "internode_compression", value_status::Used, "none",
         "Controls whether traffic between nodes is compressed. The valid values are:\n"
-        "\tall: All traffic is compressed.\n"
-        "\tdc : Traffic between data centers is compressed.\n"
-        "\tnone : No compression.")
+        "* all: All traffic is compressed.\n"
+        "* dc : Traffic between data centers is compressed.\n"
+        "* none : No compression.",
+        {"all", "dc", "none"})
     , internode_compression_zstd_max_cpu_fraction(this, "internode_compression_zstd_max_cpu_fraction", liveness::LiveUpdate, value_status::Used, 0.000,
         "ZSTD compression of RPC will consume at most this fraction of each internode_compression_zstd_quota_refresh_period_ms time slice.\n"
         "If you wish to try out zstd for RPC compression, 0.05 is a reasonable starting point.")
@@ -1097,6 +1107,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "\n"
         "* priority_string: (Default: not set, use default) GnuTLS priority string controlling TLS algorithms used/allowed.\n"
         "* require_client_auth: (Default: false) Enables or disables certificate authentication.\n"
+        "* enable_session_tickets: (Default: false) Enables or disables TLS1.3 session tickets.\n"
         "\n"
         "Related information: Client-to-node encryption")
     , alternator_encryption_options(this, "alternator_encryption_options", value_status::Used, {/*none*/},
@@ -1106,7 +1117,8 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "\n"
         "The advanced settings are:\n"
         "\n"
-        "* priority_string: GnuTLS priority string controlling TLS algorithms used/allowed.")
+        "* priority_string: GnuTLS priority string controlling TLS algorithms used/allowed.\n"
+        "* enable_session_tickets: (Default: false) Enables or disables TLS1.3 session tickets.")
     , ssl_storage_port(this, "ssl_storage_port", value_status::Used, 7001,
         "The SSL port for encrypted communication. Unused unless enabled in encryption_options.")
     , enable_in_memory_data_store(this, "enable_in_memory_data_store", value_status::Used, false, "Enable in memory mode (system tables are always persisted).")
@@ -1138,8 +1150,8 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , repair_multishard_reader_buffer_hint_size(this, "repair_multishard_reader_buffer_hint_size", liveness::LiveUpdate, value_status::Used, 1 * 1024 * 1024,
         "The buffer size to use for the buffer-hint feature of the multishard reader when running repair in mixed-shard clusters. This can help the performance of mixed-shard repair (including RBNO). Set to 0 to disable the hint feature altogether.")
     , repair_multishard_reader_enable_read_ahead(this, "repair_multishard_reader_enable_read_ahead", liveness::LiveUpdate, value_status::Used, false,
-        "The multishard reader has a read-ahead feature to improve latencies of range-scans. This feature can be detrimental when the multishard reader is used under repair, as is the case in repair in mixed-shard clusters."
-        " This know allows disabling this read-ahead (default), this can help the performance of mixed-shard repair (including RBNO).")
+        "The multishard reader has a read-ahead feature to improve latencies of range-scans. This feature can be detrimental when the multishard reader is used under repair, as is the case with repair in mixed-shard clusters."
+        " This configuration option is disabled by default and it serves as a fall-back, to re-enable read-ahead in case it turns out that some mixed-shard repair suffer from disabling it.")
     , enable_small_table_optimization_for_rbno(this, "enable_small_table_optimization_for_rbno", liveness::LiveUpdate, value_status::Used, true, "Set true to enable small table optimization for repair based node operations")
     , ring_delay_ms(this, "ring_delay_ms", value_status::Used, 30 * 1000, "Time a node waits to hear from other nodes before joining the ring in milliseconds. Same as -Dcassandra.ring_delay_ms in cassandra.")
     , shadow_round_ms(this, "shadow_round_ms", value_status::Used, 300 * 1000, "The maximum gossip shadow round time. Can be used to reduce the gossip feature check time during node boot up.")
@@ -1200,7 +1212,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
             "Start serializing reads after their collective memory consumption goes above $normal_limit * $multiplier.")
     , reader_concurrency_semaphore_kill_limit_multiplier(this, "reader_concurrency_semaphore_kill_limit_multiplier", liveness::LiveUpdate, value_status::Used, 4,
             "Start killing reads after their collective memory consumption goes above $normal_limit * $multiplier.")
-    , reader_concurrency_semaphore_cpu_concurrency(this, "reader_concurrency_semaphore_cpu_concurrency", liveness::LiveUpdate, value_status::Used, 1,
+    , reader_concurrency_semaphore_cpu_concurrency(this, "reader_concurrency_semaphore_cpu_concurrency", liveness::LiveUpdate, value_status::Used, 2,
             "Admit new reads while there are less than this number of requests that need CPU.")
     , view_update_reader_concurrency_semaphore_serialize_limit_multiplier(this, "view_update_reader_concurrency_semaphore_serialize_limit_multiplier", liveness::LiveUpdate, value_status::Used, 2,
             "Start serializing view update reads after their collective memory consumption goes above $normal_limit * $multiplier.")
@@ -1325,7 +1337,10 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , minimum_replication_factor_warn_threshold(this, "minimum_replication_factor_warn_threshold", liveness::LiveUpdate, value_status::Used,  3, "")
     , maximum_replication_factor_warn_threshold(this, "maximum_replication_factor_warn_threshold", liveness::LiveUpdate, value_status::Used, -1, "")
     , maximum_replication_factor_fail_threshold(this, "maximum_replication_factor_fail_threshold", liveness::LiveUpdate, value_status::Used, -1, "")
-    , tablets_initial_scale_factor(this, "tablets_initial_scale_factor", value_status::Used, 1, "Calculated initial tablets are multiplied by this number")
+    , tablets_initial_scale_factor(this, "tablets_initial_scale_factor", liveness::LiveUpdate, value_status::Used, 10,
+         "Minimum average number of tablet replicas per shard per table. Suppressed by tablet options in table's schema: min_per_shard_tablet_count and min_tablet_count")
+    , tablets_per_shard_goal(this, "tablets_per_shard_goal", liveness::LiveUpdate, value_status::Used, 100,
+         "The goal for the maximum number of tablet replicas per shard. Tablet allocator tries to keep this goal.")
     , target_tablet_size_in_bytes(this, "target_tablet_size_in_bytes", liveness::LiveUpdate, value_status::Used, service::default_target_tablet_size,
          "Allows target tablet size to be configured. Defaults to 5G (in bytes). Maintaining tablets at reasonable sizes is important to be able to " \
          "redistribute load. A higher value means tablet migration throughput can be reduced. A lower value may cause number of tablets to increase significantly, " \
@@ -1340,11 +1355,11 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "\tnone   : No auditing enabled.\n"
         "\tsyslog : Audit messages sent to Syslog.\n"
         "\ttable  : Audit messages written to column family named audit.audit_log.\n")
-    , audit_categories(this, "audit_categories", value_status::Used, "DCL,DDL,AUTH", "Comma separated list of operation categories that should be audited.")
-    , audit_tables(this, "audit_tables", value_status::Used, "", "Comma separated list of table names (<keyspace>.<table>) that will be audited.")
-    , audit_keyspaces(this, "audit_keyspaces", value_status::Used, "", "Comma separated list of keyspaces that will be audited. All tables in those keyspaces will be audited")
-    , audit_unix_socket_path(this, "audit_unix_socket_path", value_status::Used, "/dev/log", "The path to the unix socket used for writting to syslog. Only applicable when audit is set to syslog.")
-    , audit_syslog_write_buffer_size(this, "audit_syslog_write_buffer_size", value_status::Used, 1048576, "The size (in bytes) of a write buffer used when writting to syslog socket.")
+    , audit_categories(this, "audit_categories", liveness::LiveUpdate, value_status::Used, "DCL,DDL,AUTH", "Comma separated list of operation categories that should be audited.")
+    , audit_tables(this, "audit_tables", liveness::LiveUpdate, value_status::Used, "", "Comma separated list of table names (<keyspace>.<table>) that will be audited.")
+    , audit_keyspaces(this, "audit_keyspaces", liveness::LiveUpdate, value_status::Used, "", "Comma separated list of keyspaces that will be audited. All tables in those keyspaces will be audited")
+    , audit_unix_socket_path(this, "audit_unix_socket_path", value_status::Used, "/dev/log", "The path to the unix socket used for writing to syslog. Only applicable when audit is set to syslog.")
+    , audit_syslog_write_buffer_size(this, "audit_syslog_write_buffer_size", value_status::Used, 1048576, "The size (in bytes) of a write buffer used when writing to syslog socket.")
     , ldap_url_template(this, "ldap_url_template", value_status::Used, "", "LDAP URL template used by LDAPRoleManager for crafting queries.")
     , ldap_attr_role(this, "ldap_attr_role", value_status::Used, "", "LDAP attribute containing Scylla role.")
     , ldap_bind_dn(this, "ldap_bind_dn", value_status::Used, "", "Distinguished name used by LDAPRoleManager for binding to LDAP server.")
@@ -1393,6 +1408,18 @@ void db::config::add_tags_extension() {
 
 void db::config::add_tombstone_gc_extension() {
     _extensions->add_schema_extension<tombstone_gc_extension>(tombstone_gc_extension::NAME);
+}
+
+void db::config::add_paxos_grace_seconds_extension() {
+    _extensions->add_schema_extension<db::paxos_grace_seconds_extension>(db::paxos_grace_seconds_extension::NAME);
+}
+
+void db::config::add_all_default_extensions() {
+    add_cdc_extension();
+    add_per_partition_rate_limit_extension();
+    add_tags_extension();
+    add_tombstone_gc_extension();
+    add_paxos_grace_seconds_extension();
 }
 
 void db::config::setup_directories() {
@@ -1610,6 +1637,9 @@ future<> configure_tls_creds_builder(seastar::tls::credentials_builder& creds, d
     }
     if (is_true(get_or_default(options, "require_client_auth", "false"))) {
         creds.set_client_auth(seastar::tls::client_auth::REQUIRE);
+    }
+    if (is_true(get_or_default(options, "enable_session_tickets", "false"))) {
+        creds.set_session_resume_mode(seastar::tls::session_resume_mode::TLS13_SESSION_TICKET);
     }
 
     auto cert = get_or_default(options, "certificate", db::config::get_conf_sub("scylla.crt").string());

@@ -8,6 +8,8 @@
 # SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 
+trap 'echo "error $? in $0 line $LINENO"' ERR
+
 product="$(<build/SCYLLA-PRODUCT-FILE)"
 version="$(sed 's/-/~/' <build/SCYLLA-VERSION-FILE)"
 release="$(<build/SCYLLA-RELEASE-FILE)"
@@ -106,7 +108,7 @@ run apt-get -y update
 run apt-get -y upgrade
 run apt-get -y --no-install-suggests install dialog apt-utils
 run bash -ec "echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections"
-run apt-get -y --no-install-suggests install hostname supervisor python3 python3-yaml curl sudo systemd
+run apt-get -y --no-install-suggests install supervisor python3 python3-yaml curl sudo systemd
 run bash -ec "echo LANG=C.UTF-8 > /etc/default/locale"
 run bash -ec "dpkg -i packages/*.deb"
 run apt-get -y clean all

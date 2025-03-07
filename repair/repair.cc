@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+#include "db/config.hh"
 #include "repair.hh"
 #include "gms/gossip_address_map.hh"
 #include "repair/row_level.hh"
@@ -29,7 +30,6 @@
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/range/algorithm_ext.hpp>
-#include <boost/range/numeric.hpp>
 
 #include <fmt/ranges.h>
 
@@ -51,6 +51,7 @@
 #include "idl/repair.dist.hh"
 #include "idl/node_ops.dist.hh"
 #include "utils/user_provided_param.hh"
+#include "utils/labels.hh"
 
 using namespace std::chrono_literals;
 
@@ -77,17 +78,17 @@ node_ops_metrics::node_ops_metrics(shared_ptr<repair::task_manager_module> modul
     auto ops_label_type = sm::label("ops");
     _metrics.add_group("node_ops", {
         sm::make_gauge("finished_percentage", [this] { return bootstrap_finished_percentage(); },
-                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("bootstrap")}),
+                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("bootstrap"), basic_level}),
         sm::make_gauge("finished_percentage", [this] { return replace_finished_percentage(); },
-                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("replace")}),
+                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("replace"), basic_level}),
         sm::make_gauge("finished_percentage", [this] { return rebuild_finished_percentage(); },
-                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("rebuild")}),
+                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("rebuild"), basic_level}),
         sm::make_gauge("finished_percentage", [this] { return decommission_finished_percentage(); },
-                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("decommission")}),
+                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("decommission"), basic_level}),
         sm::make_gauge("finished_percentage", [this] { return removenode_finished_percentage(); },
-                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("removenode")}),
+                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("removenode"), basic_level}),
         sm::make_gauge("finished_percentage", [this] { return repair_finished_percentage(); },
-                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("repair")}),
+                sm::description("Finished percentage of node operation on this shard"), {ops_label_type("repair"), basic_level}),
     });
 }
 
@@ -389,6 +390,18 @@ future<std::tuple<bool, gc_clock::time_point>> repair_service::flush_hints(repai
         auto start_time = gc_clock::now();
         std::vector<gc_clock::time_point> times;
         try {
+            std::vector<locator::host_id> nodes_down;
+            for (auto& node : waiting_nodes) {
+                co_await coroutine::maybe_yield();
+                if (!get_gossiper().is_alive(node)) {
+                    nodes_down.push_back(node);
+                }
+            }
+            if (!nodes_down.empty()) {
+                rlogger.warn("repair[{}]: Skipped sending repair_flush_hints_batchlog due to nodes_down={}, continue to run repair",
+                        nodes_down, uuid);
+                co_return std::make_tuple(hints_batchlog_flushed, flush_time);
+            }
             co_await parallel_for_each(waiting_nodes, [this, uuid, start_time, &times, &req] (locator::host_id node) -> future<> {
                 rlogger.info("repair[{}]: Sending repair_flush_hints_batchlog to node={}, started",
                         uuid, node);
@@ -596,7 +609,7 @@ future<uint64_t> estimate_partitions(seastar::sharded<replica::database>& db, co
             // FIXME: If sstables are shared, they will be accounted more than
             // once. However, shared sstables should exist for a short-time only.
             auto sstables = db.find_column_family(keyspace, cf).get_sstables();
-            return boost::accumulate(*sstables, uint64_t(0),
+            return std::ranges::fold_left(*sstables, uint64_t(0),
                 [&range] (uint64_t x, auto&& sst) { return x + sst->estimated_keys_for_range(range); });
         },
         uint64_t(0),
@@ -1009,7 +1022,7 @@ private:
     }
 };
 
-void repair::shard_repair_task_impl::release_resources() noexcept {
+future<> repair::shard_repair_task_impl::release_resources() noexcept {
     erm = {};
     cfs = {};
     data_centers = {};
@@ -1018,6 +1031,7 @@ void repair::shard_repair_task_impl::release_resources() noexcept {
     neighbors = {};
     dropped_tables = {};
     nodes_down = {};
+    return make_ready_future();
 }
 
 future<> repair::shard_repair_task_impl::do_repair_ranges() {
@@ -1487,7 +1501,16 @@ future<> repair::data_sync_repair_task_impl::run() {
     auto& keyspace = _status.keyspace;
     auto& sharded_db = rs.get_db();
     auto& db = sharded_db.local();
-    auto germs = make_lw_shared(co_await locator::make_global_effective_replication_map(sharded_db, keyspace));
+    auto germs_fut = co_await coroutine::as_future(locator::make_global_effective_replication_map(sharded_db, keyspace));
+    if (germs_fut.failed()) {
+        auto ex = germs_fut.get_exception();
+        if (try_catch<data_dictionary::no_such_keyspace>(ex)) {
+            rlogger.warn("sync data: keyspace {} does not exist, skipping", keyspace);
+            co_return;
+        }
+        co_await coroutine::return_exception_ptr(std::move(ex));
+    }
+    auto germs = make_lw_shared(germs_fut.get());
 
     auto id = get_repair_uniq_id();
 
@@ -1498,6 +1521,7 @@ future<> repair::data_sync_repair_task_impl::run() {
         static const std::unordered_set<sstring> small_table_optimization_enabled_ks = {
             "system_distributed",
             "system_distributed_everywhere",
+            "system_replicated_keys",
             "system_auth",
             "system_traces"
         };
@@ -2398,11 +2422,11 @@ future<> repair_service::repair_tablets(repair_uniq_id rid, sstring keyspace_nam
             }
         }
     }
-    auto task = co_await _repair_module->make_and_start_task<repair::tablet_repair_task_impl>({}, rid, keyspace_name, table_names, streaming::stream_reason::repair, std::move(task_metas), ranges_parallelism);
+    auto task = co_await _repair_module->make_and_start_task<repair::tablet_repair_task_impl>({}, rid, keyspace_name, tasks::task_id::create_null_id(), table_names, streaming::stream_reason::repair, std::move(task_metas), ranges_parallelism);
 }
 
 // It is called by the repair_tablet rpc verb to repair the given tablet
-future<gc_clock::time_point> repair_service::repair_tablet(gms::gossip_address_map& addr_map, locator::tablet_metadata_guard& guard, locator::global_tablet_id gid) {
+future<gc_clock::time_point> repair_service::repair_tablet(gms::gossip_address_map& addr_map, locator::tablet_metadata_guard& guard, locator::global_tablet_id gid, tasks::task_info global_tablet_repair_task_info) {
     auto id = _repair_module->new_repair_uniq_id();
     rlogger.debug("repair[{}]: Starting tablet repair global_tablet_id={}", id.uuid(), gid);
     auto& db = get_db().local();
@@ -2425,10 +2449,24 @@ future<gc_clock::time_point> repair_service::repair_tablet(gms::gossip_address_m
     auto replicas = info.replicas;
     std::vector<locator::host_id> nodes;
     std::vector<shard_id> shards;
-    shard_id master_shard_id;
+    std::optional<shard_id> master_shard_id;
+    auto& topology = guard.get_token_metadata()->get_topology();
+    auto hosts_filter = info.repair_task_info.repair_hosts_filter;
+    auto dcs_filter = info.repair_task_info.repair_dcs_filter;
     for (auto& r : replicas) {
         auto shard = r.shard;
         if (r.host != myhostid) {
+            if (!hosts_filter.empty() || !dcs_filter.empty()) {
+                auto dc = topology.get_datacenter(r.host);
+                if (!info.repair_task_info.selected_by_filters(r, topology)) {
+                    rlogger.debug("repair[{}]: Check node={} from dc={} hosts_filter={} dcs_filter={} skipped",
+                        id.uuid(), r.host, dc, hosts_filter, dcs_filter);
+                    continue;
+                } else {
+                    rlogger.debug("repair[{}]: Check node={} from dc={} hosts_filter={} dcs_filter={} ok",
+                        id.uuid(), r.host, dc, hosts_filter, dcs_filter);
+                }
+            }
             nodes.push_back(r.host);
             shards.push_back(shard);
         } else {
@@ -2436,13 +2474,20 @@ future<gc_clock::time_point> repair_service::repair_tablet(gms::gossip_address_m
         }
     }
 
+    if (nodes.empty() || !master_shard_id) {
+        rlogger.info("repair[{}]: Skipped tablet repair for table={}.{} range={} replicas={} global_tablet_id={} hosts_filter={} dcs_filter={}",
+                id.uuid(), keyspace_name, table_name, range, replicas, gid, hosts_filter, dcs_filter);
+        auto flush_time = gc_clock::time_point();
+        co_return flush_time;
+    }
+
     std::vector<tablet_repair_task_meta> task_metas;
     auto ranges_parallelism = std::nullopt;
     auto start = std::chrono::steady_clock::now();
-    task_metas.push_back(tablet_repair_task_meta{keyspace_name, table_name, table_id, master_shard_id, range, repair_neighbors(nodes, shards), replicas});
-    auto task_impl_ptr = seastar::make_shared<repair::tablet_repair_task_impl>(_repair_module, id, keyspace_name, table_names, streaming::stream_reason::repair, std::move(task_metas), ranges_parallelism);
+    task_metas.push_back(tablet_repair_task_meta{keyspace_name, table_name, table_id, *master_shard_id, range, repair_neighbors(nodes, shards), replicas});
+    auto task_impl_ptr = seastar::make_shared<repair::tablet_repair_task_impl>(_repair_module, id, keyspace_name, global_tablet_repair_task_info.id, table_names, streaming::stream_reason::repair, std::move(task_metas), ranges_parallelism);
     task_impl_ptr->sched_by_scheduler = true;
-    auto task = co_await _repair_module->make_task(task_impl_ptr, {});
+    auto task = co_await _repair_module->make_task(task_impl_ptr, global_tablet_repair_task_info);
     task->start();
     co_await task->done();
     auto flush_time = task_impl_ptr->get_flush_time();
@@ -2461,10 +2506,11 @@ tasks::is_user_task repair::tablet_repair_task_impl::is_user_task() const noexce
     return tasks::is_user_task::yes;
 }
 
-void repair::tablet_repair_task_impl::release_resources() noexcept {
+future<> repair::tablet_repair_task_impl::release_resources() noexcept {
     _metas_size = _metas.size();
     _metas = {};
     _tables = {};
+    return make_ready_future();
 }
 
 size_t repair::tablet_repair_task_impl::get_metas_size() const noexcept {

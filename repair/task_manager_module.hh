@@ -117,8 +117,8 @@ private:
 public:
     bool sched_by_scheduler = false;
 public:
-    tablet_repair_task_impl(tasks::task_manager::module_ptr module, repair_uniq_id id, sstring keyspace, std::vector<sstring> tables, streaming::stream_reason reason, std::vector<tablet_repair_task_meta> metas, std::optional<int> ranges_parallelism)
-        : repair_task_impl(module, id.uuid(), id.id, "keyspace", keyspace, "", "", tasks::task_id::create_null_id(), reason)
+    tablet_repair_task_impl(tasks::task_manager::module_ptr module, repair_uniq_id id, sstring keyspace, tasks::task_id parent_id, std::vector<sstring> tables, streaming::stream_reason reason, std::vector<tablet_repair_task_meta> metas, std::optional<int> ranges_parallelism)
+        : repair_task_impl(module, id.uuid(), id.id, "keyspace", keyspace, "", "", parent_id, reason)
         , _keyspace(std::move(keyspace))
         , _tables(std::move(tables))
         , _metas(std::move(metas))
@@ -133,7 +133,7 @@ public:
     gc_clock::time_point get_flush_time() const { return _flush_time; }
 
     tasks::is_user_task is_user_task() const noexcept override;
-    virtual void release_resources() noexcept override;
+    virtual future<> release_resources() noexcept override;
 private:
     size_t get_metas_size() const noexcept;
 protected:
@@ -220,7 +220,7 @@ public:
 
     size_t ranges_size() const noexcept;
 
-    virtual void release_resources() noexcept override;
+    virtual future<> release_resources() noexcept override;
 protected:
     future<> do_repair_ranges();
     virtual future<tasks::task_manager::task::progress> get_progress() const override;

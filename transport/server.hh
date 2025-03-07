@@ -36,13 +36,16 @@
 #include "utils/chunked_vector.hh"
 #include "exceptions/coordinator_result.hh"
 #include "db/operation_type.hh"
-#include "db/config.hh"
 #include "service/maintenance_mode.hh"
 
 namespace cql3 {
 
 class query_processor;
 
+}
+
+namespace db {
+class config;
 }
 
 namespace scollectd {
@@ -221,7 +224,6 @@ private:
         timer<lowres_clock> _shedding_timer;
         scheduling_group _current_scheduling_group;
         bool _shed_incoming_requests = false;
-        unsigned _request_cpu = 0;
         bool _ready = false;
         bool _authenticating = false;
         bool _tenant_switch = false;

@@ -40,7 +40,6 @@
 #include "timestamp.hh"
 #include "utils/overloaded_functor.hh"
 #include "utils/to_string.hh"
-#include <boost/range/algorithm/transform.hpp>
 #include <optional>
 #include "db/config.hh"
 #include "replica/database.hh"
@@ -48,6 +47,7 @@
 #include "service/raft/group0_state_machine_merger.hh"
 #include "gms/feature_service.hh"
 #include "idl/migration_manager.dist.hh"
+#include "build_mode.hh"
 
 namespace service {
 
@@ -57,7 +57,7 @@ group0_state_machine::group0_state_machine(raft_group0_client& client, migration
         group0_server_accessor server_accessor, gms::gossiper& gossiper, gms::feature_service& feat,
         bool topology_change_enabled)
     : _client(client), _mm(mm), _sp(sp), _ss(ss), _topology_change_enabled(topology_change_enabled)
-    , _state_id_handler(sp.local_db(), gossiper, server_accessor)
+    , _state_id_handler(sp.local_db(), gossiper, server_accessor), _feature_service(feat)
     , _topology_on_raft_support_listener(feat.supports_consistent_topology_changes.when_enabled([this] () noexcept {
         // Using features to decide whether to start fetching topology snapshots
         // or not is technically not correct because we also use features to guard
@@ -99,7 +99,7 @@ static future<> mutate_locally(utils::chunked_vector<canonical_mutation> muts, s
     });
 }
 
-static bool should_flush_system_topology_after_applying(const mutation& mut, const data_dictionary::database db) {
+bool should_flush_system_topology_after_applying(const mutation& mut, const data_dictionary::database db) {
     if (!db.has_schema(db::system_keyspace::NAME, db::system_keyspace::TOPOLOGY)) {
         return false;
     }
@@ -120,7 +120,7 @@ static bool should_flush_system_topology_after_applying(const mutation& mut, con
     return false;
 }
 
-static future<> write_mutations_to_database(storage_proxy& proxy, gms::inet_address from, std::vector<canonical_mutation> cms) {
+future<> write_mutations_to_database(storage_proxy& proxy, gms::inet_address from, std::vector<canonical_mutation> cms) {
     std::vector<frozen_mutation_and_schema> mutations;
     mutations.reserve(cms.size());
     bool need_system_topology_flush = false;
@@ -217,6 +217,7 @@ future<> group0_state_machine::merge_and_apply(group0_state_machine_merger& merg
     co_await _sp.mutate_locally({std::move(history)}, nullptr);
 }
 
+#ifndef SCYLLA_BUILD_MODE_RELEASE
 static void ensure_group0_schema(const group0_command& cmd, const replica::database& db) {
     auto validate_schema = [&db](const std::vector<canonical_mutation>& mutations) {
         for (const auto& mut : mutations) {
@@ -250,6 +251,7 @@ static void ensure_group0_schema(const group0_command& cmd, const replica::datab
             },
         }, cmd.change);
 }
+#endif
 
 future<> group0_state_machine::apply(std::vector<raft::command_cref> command) {
     slogger.trace("apply() is called with {} commands", command.size());
@@ -322,6 +324,9 @@ future<> group0_state_machine::load_snapshot(raft::snapshot_id id) {
     // memory and thus needs to be protected with apply mutex
     auto read_apply_mutex_holder = co_await _client.hold_read_apply_mutex(_abort_source);
     co_await _ss.topology_state_load();
+    if (_feature_service.compression_dicts) {
+        co_await _ss.compression_dictionary_updated_callback();
+    }
     _ss._topology_state_machine.event.broadcast();
 }
 

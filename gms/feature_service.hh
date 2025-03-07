@@ -148,6 +148,7 @@ public:
 
     gms::feature tablet_repair_scheduler { *this, "TABLET_REPAIR_SCHEDULER"sv };
     gms::feature tablet_merge { *this, "TABLET_MERGE"sv };
+    gms::feature tablet_rack_aware_view_pairing { *this, "TABLET_RACK_AWARE_VIEW_PAIRING"sv };
 
     gms::feature tablet_migration_virtual_task { *this, "TABLET_MIGRATION_VIRTUAL_TASK"sv };
     gms::feature tablet_resize_virtual_task { *this, "TABLET_RESIZE_VIRTUAL_TASK"sv };
@@ -160,7 +161,9 @@ public:
 
     gms::feature in_memory_tables { *this, "IN_MEMORY_TABLES"sv };
     gms::feature workload_prioritization { *this, "WORKLOAD_PRIORITIZATION"sv };
+    gms::feature file_stream { *this, "FILE_STREAM"sv };
     gms::feature compression_dicts { *this, "COMPRESSION_DICTS"sv };
+    gms::feature tablet_options { *this, "TABLET_OPTIONS"sv };
 public:
 
     const std::unordered_map<sstring, std::reference_wrapper<feature>>& registered_features() const;

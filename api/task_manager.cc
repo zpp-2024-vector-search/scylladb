@@ -14,6 +14,7 @@
 #include "api/api.hh"
 #include "api/api-doc/task_manager.json.hh"
 #include "db/system_keyspace.hh"
+#include "gms/gossiper.hh"
 #include "tasks/task_handler.hh"
 #include "utils/overloaded_functor.hh"
 
@@ -25,18 +26,23 @@ namespace tm = httpd::task_manager_json;
 using namespace json;
 using namespace seastar::httpd;
 
-tm::task_status make_status(tasks::task_status status) {
-    auto start_time = db_clock::to_time_t(status.start_time);
-    auto end_time = db_clock::to_time_t(status.end_time);
-    ::tm st, et;
-    ::gmtime_r(&end_time, &et);
-    ::gmtime_r(&start_time, &st);
+static ::tm get_time(db_clock::time_point tp) {
+    auto time = db_clock::to_time_t(tp);
+    ::tm t;
+    ::gmtime_r(&time, &t);
+    return t;
+}
 
+tm::task_status make_status(tasks::task_status status, sharded<gms::gossiper>& gossiper) {
     std::vector<tm::task_identity> tis{status.children.size()};
-    std::ranges::transform(status.children, tis.begin(), [] (const auto& child) {
+    std::ranges::transform(status.children, tis.begin(), [&gossiper] (const auto& child) {
         tm::task_identity ident;
+        gms::inet_address addr{};
+        if (gossiper.local_is_initialized()) {
+            addr = gossiper.local().get_address_map().find(child.host_id).value_or(gms::inet_address{});
+        }
         ident.task_id = child.task_id.to_sstring();
-        ident.node = fmt::format("{}", child.node);
+        ident.node = fmt::format("{}", addr);
         return ident;
     });
 
@@ -47,8 +53,8 @@ tm::task_status make_status(tasks::task_status status) {
     res.scope = status.scope;
     res.state = status.state;
     res.is_abortable = bool(status.is_abortable);
-    res.start_time = st;
-    res.end_time = et;
+    res.start_time = get_time(status.start_time);
+    res.end_time = get_time(status.end_time);
     res.error = status.error;
     res.parent_id = status.parent_id ? status.parent_id.to_sstring() : "none";
     res.sequence_number = status.sequence_number;
@@ -74,10 +80,13 @@ tm::task_stats make_stats(tasks::task_stats stats) {
     res.keyspace = stats.keyspace;
     res.table = stats.table;
     res.entity = stats.entity;
+    res.shard = stats.shard;
+    res.start_time = get_time(stats.start_time);
+    res.end_time = get_time(stats.end_time);;
     return res;
 }
 
-void set_task_manager(http_context& ctx, routes& r, sharded<tasks::task_manager>& tm, db::config& cfg) {
+void set_task_manager(http_context& ctx, routes& r, sharded<tasks::task_manager>& tm, db::config& cfg, sharded<gms::gossiper>& gossiper) {
     tm::get_modules.set(r, [&tm] (std::unique_ptr<http::request> req) -> future<json::json_return_type> {
         std::vector<std::string> v = tm.local().get_modules() | std::views::keys | std::ranges::to<std::vector>();
         co_return v;
@@ -135,7 +144,7 @@ void set_task_manager(http_context& ctx, routes& r, sharded<tasks::task_manager>
         co_return std::move(f);
     });
 
-    tm::get_task_status.set(r, [&tm] (std::unique_ptr<http::request> req) -> future<json::json_return_type> {
+    tm::get_task_status.set(r, [&tm, &gossiper] (std::unique_ptr<http::request> req) -> future<json::json_return_type> {
         auto id = tasks::task_id{utils::UUID{req->get_path_param("task_id")}};
         tasks::task_status status;
         try {
@@ -144,7 +153,7 @@ void set_task_manager(http_context& ctx, routes& r, sharded<tasks::task_manager>
         } catch (tasks::task_manager::task_not_found& e) {
             throw bad_param_exception(e.what());
         }
-        co_return make_status(status);
+        co_return make_status(status, gossiper);
     });
 
     tm::abort_task.set(r, [&tm] (std::unique_ptr<http::request> req) -> future<json::json_return_type> {
@@ -160,7 +169,7 @@ void set_task_manager(http_context& ctx, routes& r, sharded<tasks::task_manager>
         co_return json_void();
     });
 
-    tm::wait_task.set(r, [&tm] (std::unique_ptr<http::request> req) -> future<json::json_return_type> {
+    tm::wait_task.set(r, [&tm, &gossiper] (std::unique_ptr<http::request> req) -> future<json::json_return_type> {
         auto id = tasks::task_id{utils::UUID{req->get_path_param("task_id")}};
         tasks::task_status status;
         std::optional<std::chrono::seconds> timeout = std::nullopt;
@@ -175,24 +184,24 @@ void set_task_manager(http_context& ctx, routes& r, sharded<tasks::task_manager>
         } catch (timed_out_error& e) {
             throw httpd::base_exception{e.what(), http::reply::status_type::request_timeout};
         }
-        co_return make_status(status);
+        co_return make_status(status, gossiper);
     });
 
-    tm::get_task_status_recursively.set(r, [&_tm = tm] (std::unique_ptr<http::request> req) -> future<json::json_return_type> {
+    tm::get_task_status_recursively.set(r, [&_tm = tm, &gossiper] (std::unique_ptr<http::request> req) -> future<json::json_return_type> {
         auto& tm = _tm;
         auto id = tasks::task_id{utils::UUID{req->get_path_param("task_id")}};
         try {
             auto task = tasks::task_handler{tm.local(), id};
             auto res = co_await task.get_status_recursively(true);
 
-            std::function<future<>(output_stream<char>&&)> f = [r = std::move(res)] (output_stream<char>&& os) -> future<> {
+            std::function<future<>(output_stream<char>&&)> f = [r = std::move(res), &gossiper] (output_stream<char>&& os) -> future<> {
                 auto s = std::move(os);
                 auto res = std::move(r);
                 co_await s.write("[");
                 std::string delim = "";
                 for (auto& status: res) {
                     co_await s.write(std::exchange(delim, ", "));
-                    co_await formatter::write(s, make_status(status));
+                    co_await formatter::write(s, make_status(status, gossiper));
                 }
                 co_await s.write("]");
                 co_await s.close();
@@ -232,6 +241,32 @@ void set_task_manager(http_context& ctx, routes& r, sharded<tasks::task_manager>
         uint32_t user_ttl = cfg.user_task_ttl_seconds();
         co_return json::json_return_type(user_ttl);
     });
+
+    tm::drain_tasks.set(r, [&tm] (std::unique_ptr<http::request> req) -> future<json::json_return_type> {
+        co_await tm.invoke_on_all([&req] (tasks::task_manager& tm) -> future<> {
+            tasks::task_manager::module_ptr module;
+            try {
+                module = tm.find_module(req->get_path_param("module"));
+            } catch (...) {
+                throw bad_param_exception(fmt::format("{}", std::current_exception()));
+            }
+
+            const auto& local_tasks = module->get_local_tasks();
+            std::vector<tasks::task_id> ids;
+            ids.reserve(local_tasks.size());
+            std::transform(begin(local_tasks), end(local_tasks), std::back_inserter(ids), [] (const auto& task) {
+                return task.second->is_complete() ? task.first : tasks::task_id::create_null_id();
+            });
+
+            for (auto&& id : ids) {
+                if (id) {
+                    module->unregister_task(id);
+                }
+                co_await maybe_yield();
+            }
+        });
+        co_return json_void();
+    });
 }
 
 void unset_task_manager(http_context& ctx, routes& r) {
@@ -243,6 +278,7 @@ void unset_task_manager(http_context& ctx, routes& r) {
     tm::get_task_status_recursively.unset(r);
     tm::get_and_update_ttl.unset(r);
     tm::get_ttl.unset(r);
+    tm::drain_tasks.unset(r);
 }
 
 }

@@ -58,9 +58,12 @@ network_topology_strategy::network_topology_strategy(replication_strategy_params
         }
 
         if (boost::iequals(key, "replication_factor")) {
-            throw exceptions::configuration_exception(
-                "replication_factor is an option for SimpleStrategy, not "
-                "NetworkTopologyStrategy");
+            if (boost::equals(key, "replication_factor")) {
+                on_internal_error(rslogger, "replication_factor should have been replaced with a DC:RF mapping by now");
+            } else {
+                throw exceptions::configuration_exception(format(
+                "'{}' is not a valid option, did you mean (lowercase) 'replication_factor'?", key));
+            }
         }
 
         auto rf = parse_replication_factor(val);
@@ -267,30 +270,23 @@ network_topology_strategy::calculate_natural_endpoints(
     co_return std::move(tracker.replicas());
 }
 
-void network_topology_strategy::validate_options(const gms::feature_service& fs) const {
-    if(_config_options.empty()) {
-        throw exceptions::configuration_exception("Configuration for at least one datacenter must be present");
-    }
+void network_topology_strategy::validate_options(const gms::feature_service& fs, const locator::topology& topology) const {
+    // #22688 / #20039 - we want to remove dc:s once rf=0, and we
+    // also want to allow fully setting rf=0 in _all_ dc:s (hello data loss)
+    // so empty options here are in fact ok. Removed check for it
+    auto dcs = topology.get_datacenters();
     validate_tablet_options(*this, fs, _config_options);
-    auto tablet_opts = recognized_tablet_options();
     for (auto& c : _config_options) {
-        if (tablet_opts.contains(c.first)) {
-            continue;
-        }
         if (c.first == sstring("replication_factor")) {
-            throw exceptions::configuration_exception(
-                "replication_factor is an option for simple_strategy, not "
-                "network_topology_strategy");
+            on_internal_error(rslogger, fmt::format("'replication_factor' tag should be unrolled into a list of DC:RF by now."
+                                                    "_config_options:{}", _config_options));
+        }
+        if (!dcs.contains(c.first)) {
+            throw exceptions::configuration_exception(format("Unrecognized strategy option {{{}}} "
+                "passed to NetworkTopologyStrategy", this->to_qualified_class_name(c.first)));
         }
         parse_replication_factor(c.second);
     }
-}
-
-std::optional<std::unordered_set<sstring>> network_topology_strategy::recognized_options(const topology& topology) const {
-    // We only allow datacenter names as options
-    auto opts = topology.get_datacenters();
-    opts.merge(recognized_tablet_options());
-    return opts;
 }
 
 effective_replication_map_ptr network_topology_strategy::make_replication_map(table_id table, token_metadata_ptr tm) const {
@@ -300,49 +296,13 @@ effective_replication_map_ptr network_topology_strategy::make_replication_map(ta
     return do_make_replication_map(table, shared_from_this(), std::move(tm), _rep_factor);
 }
 
-//
-// Try to use as many tablets initially, so that all shards in the current topology
-// are covered with at least one tablet. In other words, the value is
-//
-//    initial_tablets = max(nr_shards_in(dc) / RF_in(dc) for dc in datacenters)
-//
-
-static unsigned calculate_initial_tablets_from_topology(const schema& s, token_metadata_ptr tm, const std::unordered_map<sstring, size_t>& rf) {
-    unsigned initial_tablets = std::numeric_limits<unsigned>::min();
-    for (const auto& dc : tm->get_datacenter_token_owners()) {
-        unsigned shards_in_dc = 0;
-        unsigned rf_in_dc = 1;
-
-        for (const auto& ep : dc.second) {
-            const auto* node = tm->get_topology().find_node(ep);
-            if (node != nullptr) {
-                shards_in_dc += node->get_shard_count();
-            }
-        }
-
-        if (auto it = rf.find(dc.first); it != rf.end()) {
-            rf_in_dc = it->second;
-        }
-
-        unsigned tablets_in_dc = rf_in_dc > 0 ? (shards_in_dc + rf_in_dc - 1) / rf_in_dc : 0;
-        initial_tablets = std::max(initial_tablets, tablets_in_dc);
-    }
-    rslogger.debug("Estimated {} initial tablets for table {}.{}", initial_tablets, s.ks_name(), s.cf_name());
-    return initial_tablets;
-}
-
-future<tablet_map> network_topology_strategy::allocate_tablets_for_new_table(schema_ptr s, token_metadata_ptr tm, unsigned initial_scale) const {
-    auto tablet_count = get_initial_tablets();
-    if (tablet_count == 0) {
-        tablet_count = calculate_initial_tablets_from_topology(*s, tm, _dc_rep_factor) * initial_scale;
-    }
+future<tablet_map> network_topology_strategy::allocate_tablets_for_new_table(schema_ptr s, token_metadata_ptr tm, size_t tablet_count) const {
     auto aligned_tablet_count = 1ul << log2ceil(tablet_count);
     if (tablet_count != aligned_tablet_count) {
         rslogger.info("Rounding up tablet count from {} to {} for table {}.{}", tablet_count, aligned_tablet_count, s->ks_name(), s->cf_name());
         tablet_count = aligned_tablet_count;
     }
-
-    return reallocate_tablets(std::move(s), std::move(tm), tablet_map(tablet_count));
+    co_return co_await reallocate_tablets(std::move(s), std::move(tm), tablet_map(tablet_count));
 }
 
 future<tablet_map> network_topology_strategy::reallocate_tablets(schema_ptr s, token_metadata_ptr tm, tablet_map tablets) const {
@@ -376,7 +336,10 @@ future<tablet_replica_set> network_topology_strategy::reallocate_tablets(schema_
         ++nodes_per_dc[node.dc_rack().dc];
     }
 
-    for (const auto& [dc, dc_rf] : _dc_rep_factor) {
+    // #22688 - take all dcs in topology into account when determining migration.
+    // Any change should still have been pre-checked to never exceed rf factor one.
+    for (const auto& dc : tm->get_topology().get_datacenters()) {
+        auto dc_rf = get_replication_factor(dc);
         auto dc_node_count = nodes_per_dc[dc];
         if (dc_rf == dc_node_count) {
             continue;
@@ -430,8 +393,8 @@ future<tablet_replica_set> network_topology_strategy::add_tablets_in_dc(schema_p
             continue;
         }
         const auto& existing = replicas_per_rack[rack];
-        auto& candidate = existing.empty() ?
-                new_racks.emplace_back(rack) : existing_racks.emplace_back(rack);
+        candidates_list& rack_list = existing.empty() ? new_racks : existing_racks;
+        auto& candidate = rack_list.emplace_back(rack);
         for (const auto& node : nodes) {
             if (!node.get().is_normal()) {
                 continue;
@@ -442,7 +405,7 @@ future<tablet_replica_set> network_topology_strategy::add_tablets_in_dc(schema_p
             }
         }
         if (candidate.nodes.empty()) {
-            existing_racks.pop_back();
+            rack_list.pop_back();
             tablet_logger.trace("allocate_replica {}.{}: no candidate nodes left on rack={}", s->ks_name(), s->cf_name(), rack);
             // Note that this rack can't be in new_racks since
             // those had no existing replicas and if current rack has no nodes

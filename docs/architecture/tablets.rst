@@ -72,6 +72,17 @@ to a new node.
 
 .. image:: images/tablets-load-balancing.png
 
+File-based Streaming
+========================
+
+Migrating tablets is performed by streaming entire
+SStables, which does not require (de)serializing or processing mutation fragments.
+As a result, less data is streamed over the network, and less CPU is consumed,
+especially for data models that contain small cells.
+
+File-based streaming is used for tablet migration in all 
+:ref:`keyspaces created with tablets enabled <tablets>`.
+
 .. _tablets-enable-tablets: 
 
 Enabling Tablets
@@ -124,6 +135,8 @@ You can create a keyspace with tablets enabled with the ``tablets = {'enabled': 
     the keyspace schema with ``tablets = { 'enabled': false }`` or 
     ``tablets = { 'enabled': true }``.
 
+.. _tablets-limitations:
+
 Limitations and Unsupported Features
 --------------------------------------
 
@@ -137,6 +150,15 @@ enabled:
 
 If you plan to use any of the above features, CREATE your keyspace
 :ref:`with tablets disabled <tablets-enable-tablets>`.
+
+The following ScyllaDB features are disabled by default when used with a keyspace
+that has tablets enabled:
+
+* Materialized Views (MV)
+* Secondary indexes (SI, as it depends on MV)
+
+To enable MV and SI for tablet keyspaces, use the `--experimental-features=views-with-tablets`
+configuration option.  See :ref:`Views with tablets <admin-views-with-tablets>` for details.
 
 Resharding in keyspaces with tablets enabled has the following limitations:
 

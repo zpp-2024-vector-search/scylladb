@@ -20,7 +20,6 @@
 #include <boost/algorithm/string/split.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/make_shared.hpp>
-#include <boost/range/adaptor/map.hpp>
 #include <fmt/chrono.h>
 #include <fmt/ranges.h>
 #include <seastar/core/sleep.hh>
@@ -1209,8 +1208,12 @@ void netstats_operation(scylla_rest_client& client, const bpo::variables_map& vm
                     fmt::print(std::cout, " (using /{})", private_ip);
                 }
                 fmt::print(std::cout, "\n");
-                print_stream_session(session["receiving_summaries"], session["receiving_files"], "Receiving", "received", "from", human_readable);
-                print_stream_session(session["sending_summaries"], session["sending_files"], "Sending", "sent", "to", human_readable);
+                if (session.HasMember("receiving_summaries")) {
+                    print_stream_session(session["receiving_summaries"], session["receiving_files"], "Receiving", "received", "from", human_readable);
+                }
+                if (session.HasMember("sending_summaries")) {
+                    print_stream_session(session["sending_summaries"], session["sending_files"], "Sending", "sent", "to", human_readable);
+                }
             }
         }
     }
@@ -2793,11 +2796,20 @@ void table_stats_operation(scylla_rest_client& client, const bpo::variables_map&
     }
 }
 
+std::string get_time(std::string_view time) {
+    static constexpr const char* epoch = "1970-01-01T00:00:00Z";
+    return time == epoch ? "" : std::string{time};
+}
+
 void tasks_print_status(const rjson::value& res) {
     auto status = res.GetObject();
     for (const auto& x: status) {
         if (x.value.IsString()) {
-            fmt::print("{}: {}\n", x.name.GetString(), x.value.GetString());
+            if (strcmp(x.name.GetString(), "start_time") == 0 || strcmp(x.name.GetString(), "end_time") == 0) {
+                fmt::print("{}: {}\n", x.name.GetString(), get_time(x.value.GetString()));
+            } else {
+                fmt::print("{}: {}\n", x.name.GetString(), x.value.GetString());
+            }
         } else if (x.value.IsArray()) {
             fmt::print("{}: [", x.name.GetString());
             sstring delim = "";
@@ -2845,8 +2857,8 @@ void tasks_add_tree_to_statuses_lists(Tabulate& table, const rjson::value& res) 
                 rjson::to_string_view(status["scope"]),
                 rjson::to_string_view(status["state"]),
                 status["is_abortable"].GetBool(),
-                rjson::to_string_view(status["start_time"]),
-                rjson::to_string_view(status["end_time"]),
+                get_time(rjson::to_string_view(status["start_time"])),
+                get_time(rjson::to_string_view(status["end_time"])),
                 rjson::to_string_view(status["error"]),
                 rjson::to_string_view(status["parent_id"]),
                 status["sequence_number"].GetUint64(),
@@ -2878,7 +2890,7 @@ void tasks_print_trees(const std::vector<rjson::value>& res) {
 void tasks_print_stats_list(const rjson::value& res) {
     auto stats = res.GetArray();
     Tabulate table;
-    table.add("task_id", "type", "kind", "scope", "state", "sequence_number", "keyspace", "table", "entity");
+    table.add("task_id", "type", "kind", "scope", "state", "sequence_number", "keyspace", "table", "entity", "shard", "start_time", "end_time");
     for (auto& element : stats) {
         const auto& s = element.GetObject();
 
@@ -2890,7 +2902,10 @@ void tasks_print_stats_list(const rjson::value& res) {
                 s["sequence_number"].GetUint64(),
                 rjson::to_string_view(s["keyspace"]),
                 rjson::to_string_view(s["table"]),
-                rjson::to_string_view(s["entity"]));
+                rjson::to_string_view(s["entity"]),
+                s["shard"].GetUint(),
+                get_time(rjson::to_string_view(s["start_time"])),
+                get_time(rjson::to_string_view(s["end_time"])));
     }
     table.print();
 }
@@ -2909,6 +2924,18 @@ void tasks_abort_operation(scylla_rest_client& client, const bpo::variables_map&
         }
 
         fmt::print("Task with id {} is not abortable\n", id);
+    }
+}
+
+void tasks_drain_operation(scylla_rest_client& client, const bpo::variables_map& vm) {
+    if (vm.contains("module")) {
+        auto module = vm["module"].as<sstring>();
+        auto res = client.post(format("/task_manager/drain/{}", module));
+        return;
+    }
+    auto module_res = client.get("/task_manager/list_modules");
+    for (const auto& module : module_res.GetArray()) {
+        auto drain_res = client.post(format("/task_manager/drain/{}", module.GetString()));
     }
 }
 
@@ -4269,6 +4296,20 @@ For more information, see: {}"
                             },
                         },
                         {
+                            "drain",
+                            "Drains tasks",
+fmt::format(R"(
+Unregisters all finished local tasks from the specified module. If a module is not specified,
+all modules are drained.
+
+For more information, see: {}"
+)", doc_link("operating-scylla/nodetool-commands/tasks/drain.html")),
+                            {
+                                typed_option<sstring>("module", "The module name; if specified, only the tasks from this module are unregistered"),
+                            },
+                            { },
+                        },
+                        {
                             "user-ttl",
                             "Gets or sets user task ttl",
 fmt::format(R"(
@@ -4287,7 +4328,7 @@ For more information, see: {}"
                             "Gets a list of tasks in a given module",
 fmt::format(R"(
 Lists short stats (including id, type, kind, scope, state, sequence_number,
-keyspace, table, and entity) of tasks in a specified module.
+keyspace, table, entity, shard, start_time, and end_time) of tasks in a specified module.
 
 Allows to monitor tasks for extended time.
 
@@ -4381,6 +4422,9 @@ For more information, see: {}"
                 {
                     {
                         "abort", { tasks_abort_operation }
+                    },
+                    {
+                        "drain", { tasks_drain_operation }
                     },
                     {
                         "user-ttl", { tasks_user_ttl_operation }

@@ -22,9 +22,6 @@
 #include "db/view/view.hh"
 #include "concrete_types.hh"
 #include "db/tags/extension.hh"
-
-#include <boost/range/adaptor/map.hpp>
-#include <boost/algorithm/string/predicate.hpp>
 #include <set>
 #include <string_view>
 
@@ -161,7 +158,7 @@ sstring index_table_name(const sstring& index_name) {
 }
 
 sstring index_name_from_table_name(const sstring& table_name) {
-    if (table_name.size() < 7 || !boost::algorithm::ends_with(table_name, "_index")) {
+    if (table_name.size() < 7 || !table_name.ends_with("_index")) {
         throw std::runtime_error(format("Table {} does not have _index suffix", table_name));
     }
     return table_name.substr(0, table_name.size() - 6); // remove the _index suffix from an index name;

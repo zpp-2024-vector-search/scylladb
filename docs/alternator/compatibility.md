@@ -34,7 +34,7 @@ Instructions for doing this can be found in:
 ## Write isolation policies
 
 Scylla was designed to optimize the performance of pure write operations -
-writes which do not need to read the the previous value of the item.
+writes which do not need to read the previous value of the item.
 In CQL, writes which do need the previous value of the item must explicitly
 use the slower LWT ("LightWeight Transaction") feature to be correctly
 isolated from each other. It is not allowed to mix LWT and non-LWT writes
@@ -89,12 +89,12 @@ one or more of the following:
 3. Consider using the `always_use_lwt` write isolation policy.
    It is slower, but has better guarantees.
 
-Another guarantee that that `always_use_lwt` can make and other write
+Another guarantee that `always_use_lwt` can make and other write
 isolation modes do not is that writes to the same item are _serialized_:
 Even if the two write are sent at exactly the same time to two different
 nodes, the result will appear as if one write happened first, and then
 the other. But in other modes (with non-LWT writes), two writes can get
-exactly the same microsecond-resolution timestamp, the the result may be
+exactly the same microsecond-resolution timestamp, the result may be
 a mixture of both writes - some attributes from one and some from the
 other - instead of being just one or the other.
 
@@ -187,8 +187,8 @@ ATTACH SERVICE_LEVEL oltp TO bob;
 Note that `alternator_enforce_authorization` has to be enabled in Scylla configuration.
 
 See [Authorization](##Authorization) section to learn more about roles and authorization.
-See <https://enterprise.docs.scylladb.com/stable/using-scylla/workload-prioritization.html>
-to read about **Workload Prioritization** in detail.
+See [Workload Prioritization](../features/workload-prioritization)
+to read about Workload Prioritization in detail.
 
 ## Metrics
 
@@ -272,12 +272,6 @@ behave the same in Alternator. However, there are a few features which we have
 not implemented yet. Unimplemented features return an error when used, so
 they should be easy to detect. Here is a list of these unimplemented features:
 
-* Currently in Alternator, a GSI (Global Secondary Index) can only be added
-  to a table at table creation time. DynamoDB allows adding a GSI (but not an
-  LSI) to an existing table using an UpdateTable operation, and similarly it
-  allows removing a GSI from a table.
-  <https://github.com/scylladb/scylla/issues/11567>
-
 * GSI (Global Secondary Index) and LSI (Local Secondary Index) may be
   configured to project only a subset of the base-table attributes to the
   index. This option is not yet respected by Alternator - all attributes
@@ -319,7 +313,7 @@ they should be easy to detect. Here is a list of these unimplemented features:
   RestoreTableToPointInTime
 
 * DynamoDB's encryption-at-rest settings are not supported. The Encryption-
-  at-rest feature is available in Scylla Enterprise, but needs to be
+  at-rest feature is available in ScyllaDB, but needs to be
   enabled and configured separately, not through the DynamoDB API.
 
 * No support for throughput accounting or capping. As mentioned above, the
@@ -378,3 +372,14 @@ they should be easy to detect. Here is a list of these unimplemented features:
   that can be used to forbid table deletion. This table option was added to
   DynamoDB in March 2023.
   <https://github.com/scylladb/scylla/issues/14482>
+
+* Alternator does not support the table option WarmThroughput that can be
+  used to check or guarantee that the database has "warmed" to handle a
+  particular throughput. This table option was added to DynamoDB in
+  November 2024.
+  <https://github.com/scylladb/scylladb/issues/21853>
+
+* Alternator does not support the table option MultiRegionConsistency
+  that can be used to achieve consistent reads on global (multi-region) tables.
+  This table option was added as a preview to DynamoDB in December 2024.
+  <https://github.com/scylladb/scylladb/issues/21852>

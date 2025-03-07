@@ -3,6 +3,8 @@
 #
 # SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
+import re
+import subprocess
 from collections.abc import Coroutine
 import threading
 import time
@@ -10,7 +12,8 @@ import asyncio
 import logging
 import pathlib
 import os
-import pytest
+from functools import cache
+
 import random
 import string
 
@@ -255,3 +258,49 @@ async def wait_for_first_completed(coros: list[Coroutine]):
         t.cancel()
     for t in done:
         await t
+
+
+def ninja(target):
+    """Build specified target using ninja"""
+    build_dir = 'build'
+    args = ['ninja', target]
+    if os.path.exists(os.path.join(build_dir, 'build.ninja')):
+        args = ['ninja', '-C', build_dir, target]
+    return subprocess.Popen(args, stdout=subprocess.PIPE).communicate()[0].decode()
+
+
+@cache
+def get_configured_modes(root_dir=None):
+    if root_dir:
+        os.chdir(root_dir)
+    out = ninja('mode_list')
+    # [1/1] List configured modes
+    # debug release dev
+    return re.sub(r'.* List configured modes\n(.*)\n', r'\1',
+                            out, count=1, flags=re.DOTALL).split('\n')[-1].split(' ')
+
+
+def get_modes_to_run(session) -> list[str]:
+    modes = session.config.getoption('modes')
+    if not modes:
+        modes = get_configured_modes(root_dir=pathlib.Path(session.config.rootpath).parent)
+    if not modes:
+        raise RuntimeError('No modes configured. Please run ./configure.py first')
+    return modes
+
+
+async def gather_safely(*awaitables: Awaitable):
+    """
+    Developers using asyncio.gather() often assume that it waits for all futures (awaitables) givens.
+    But this isn't true when the return_exceptions parameter is False, which is the default.
+    In that case, as soon as one future completes with an exception, the gather() call will return this exception
+    immediately, and some of the finished tasks may continue to run in the background.
+    This is bad for applications that use gather() to ensure that a list of background tasks has all completed.
+    So such applications must use asyncio.gather() with return_exceptions=True, to wait for all given futures to
+    complete either successfully or unsuccessfully.
+    """
+    results = await asyncio.gather(*awaitables, return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result from None
+    return results

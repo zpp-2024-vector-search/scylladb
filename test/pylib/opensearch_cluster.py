@@ -7,87 +7,61 @@
 """OpenSearch cluster for testing.
    Provides helpers to setup and manage OpenSearch cluster for testing.
 """
-from opensearchpy import OpenSearch
-import os
 import argparse
 import asyncio
 from asyncio.subprocess import Process
-from typing import Generator, Optional
+from typing import Optional
 import logging
 import pathlib
-import random
 import shutil
 import time
 import tempfile
-import socket
-import yaml
+import subprocess
 from io import BufferedWriter
 
 class OpenSearchCluster:
 
-    ENV_JAVA_HOME = 'OPENSEARCH_JAVA_HOME'
-    ENV_CONF_PATH = 'OPENSEARCH_PATH_CONF'
-    ENV_ADDRESS = 'OPENSEARCH_ADDRESS'
-    ENV_PORT = 'OPENSEARCH_PORT'
-
     log_file: BufferedWriter
 
     def __init__(self, tempdir_base, address, logger):
-        self.opensearch_dir = next(
-            (f for f in pathlib.Path('/opt/scylladb/dependencies/').iterdir() 
-             if f.name.startswith("opensearch-") and f.is_dir()), 
-            pathlib.Path()
+        self.compose_file = next(
+            (f for f in pathlib.Path('./test/').rglob('opensearch.yml') if f.is_file())
         )
-        self.os_exe = shutil.which('opensearch', path=self.opensearch_dir / 'bin')
+        self.docker_exe = shutil.which('podman')
         self.address = address
-        self.port = None
+        self.port = 9200
         tempdir = tempfile.mkdtemp(dir=tempdir_base, prefix="opensearch-")
         self.tempdir = pathlib.Path(tempdir)
-        self.rootdir = self.tempdir / 'opensearch_data'
-        self.config_dir = self.tempdir / 'config'
-        self.config_file = self.config_dir / 'opensearch.yml'
         self.logger = logger
         self.cmd: Optional[Process] = None
         self.log_filename = (self.tempdir / 'opensearch').with_suffix(".log")
-        self.old_env = dict()
 
     def __repr__(self):
         return f"[opensearch] {self.address}:{self.port}"
 
     def check_server(self, port):
-        s = socket.socket()
         try:
-            s.connect((self.address, port))
-            return True
-        except socket.error:
+            result = subprocess.run(
+                ['curl', f'http://{self.address}:{port}'],
+                capture_output=True,
+            ).returncode
+            return not result
+        except subprocess.SubprocessError:
             return False
-        finally:
-            s.close()
-
-    def _get_local_ports(self, num_ports: int) -> Generator[int, None, None]:
-        with open('/proc/sys/net/ipv4/ip_local_port_range', encoding='ascii') as port_range:
-            min_port, max_port = map(int, port_range.read().split())
-        for _ in range(num_ports):
-            yield random.randint(min_port, max_port)
-
-    def create_conf_file(self, address: str, port: int, path: str):
-        with open(path, 'w', encoding='ascii') as config_file:
-            config = {
-                'network.host': address,
-                'http.port': port,
-                'plugins.security.disabled': True,
-                'path.data': str(self.rootdir),
-            }
-            yaml.dump(config, config_file)
 
     async def _run_cluster(self, port):
         self.logger.info(f'Starting OpenSearch cluster at {self.address}:{port}')
         cmd = await asyncio.create_subprocess_exec(
-            self.os_exe,
+            self.docker_exe,
+            *['compose',
+            '-f',
+            self.compose_file,
+            'up'],
             stdout=self.log_file,
             stderr=self.log_file,
             start_new_session=True
         )
+
         timeout = time.time() + 30
         while time.time() < timeout:
             if cmd.returncode is not None:
@@ -97,66 +71,31 @@ class OpenSearchCluster:
                 self.logger.info('Opensearch is up and running')
                 break
 
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.2)
 
         return cmd
 
-    def _set_environ(self):
-        self.old_env = dict(os.environ)
-        os.environ[self.ENV_JAVA_HOME] = f'{self.opensearch_dir}/jdk'
-        os.environ[self.ENV_CONF_PATH] = f'{self.config_dir}'
-        os.environ[self.ENV_ADDRESS] = f'{self.address}'
-        os.environ[self.ENV_PORT] = f'{self.port}'
-
-    def _get_environs(self):
-        return [self.ENV_JAVA_HOME, self.ENV_CONF_PATH, self.ENV_ADDRESS, self.ENV_PORT]
-
-    def _unset_environ(self):
-        for env in self._get_environs():
-            if value := self.old_env.get(env):
-                os.environ[env] = value
-            else:
-                del os.environ[env]
-
-    def print_environ(self):
-        msgs = []
-        for key in self._get_environs():
-            value = os.environ[key]
-            msgs.append(f'export {key}={value}')
-        print('\n'.join(msgs))
-
     async def start(self):
-        if self.os_exe is None:
-            self.logger.error("OpenSearch not installed")
+        if self.docker_exe is None:
+            self.logger.error("Container engine is not installed or not in PATH")
+            shutil.rmtree(self.tempdir)
+            return
+        
+        if self.compose_file:
+            self.logger.info(f"Found opensearch.yml at: {self.compose_file}")
+        else:
+            self.logger.error("opensearch.yml not found in ./test/** directory")
             shutil.rmtree(self.tempdir)
             return
 
         self.log_file = self.log_filename.open("wb")
-        os.mkdir(self.rootdir)
-        shutil.copytree(self.opensearch_dir / 'config', self.config_dir)
-
-        retries = 42  # just retry a fixed number of times
-        for port in self._get_local_ports(retries):
-            try:
-                self.port = port
-                self.create_conf_file(self.address, port, self.config_file)
-                self._set_environ()
-                self.cmd = await self._run_cluster(port)
-            except RuntimeError:
-                pass
-            else:
-                break
-        else:
-            self.logger.error("Failed to start OpenSearch cluster")
-            return
-
+        self.cmd = await self._run_cluster(self.port)
 
     async def stop(self):
-        self.logger.info('Killing OpenSearch cluster')
+        self.logger.info('Stopping and removing OpenSearch container')
         if not self.cmd:
             return
 
-        self._unset_environ()
         try:
             self.cmd.kill()
         except ProcessLookupError:
@@ -164,7 +103,18 @@ class OpenSearchCluster:
         else:
             await self.cmd.wait()
         finally:
-            self.logger.info('Killed OpenSearch cluster')
+            self.logger.info('Stopped OpenSearch cluster')
+            cmd_stop = await asyncio.create_subprocess_exec(
+                self.docker_exe,
+                *['compose',
+                '-f',
+                self.compose_file,
+                'down'],
+                stdout=self.log_file,
+                stderr=self.log_file,
+            )
+            await cmd_stop.communicate()
+            self.logger.info('Removed OpenSearch container')
             self.cmd = None
             shutil.rmtree(self.tempdir)
 
@@ -177,9 +127,9 @@ async def main():
     with tempfile.TemporaryDirectory(suffix='-opensearch', dir=args.tempdir) as tempdir:
         if args.tempdir is None:
             print(f'{tempdir=}')
+        logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler()], format='%(message)s')
         server = OpenSearchCluster(tempdir, args.host, logging.getLogger('opensearch'))
         await server.start()
-        server.print_environ()
         try:
             _ = input('server started. press any key to stop: ')
         except KeyboardInterrupt:

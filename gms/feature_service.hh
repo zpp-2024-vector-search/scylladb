@@ -137,6 +137,7 @@ public:
     gms::feature view_build_status_on_group0 { *this, "VIEW_BUILD_STATUS_ON_GROUP0"sv };
     gms::feature views_with_tablets { *this, "VIEWS_WITH_TABLETS"sv };
     gms::feature group0_limited_voters { *this, "GROUP0_LIMITED_VOTERS"sv };
+    gms::feature compaction_history_upgrade { *this, "COMPACTION_HISTORY_UPGRADE"};
 
     // Whether to allow fragmented commitlog entries. While this is a node-local feature as such, hide
     // behind a feature to ensure an upgrading cluster appears to be at least functional before using,
@@ -169,6 +170,7 @@ public:
     gms::feature sstable_compression_dicts { *this, "SSTABLE_COMPRESSION_DICTS"sv };
     gms::feature repair_based_tablet_rebuild { *this, "REPAIR_BASED_TABLET_REBUILD"sv };
     gms::feature enforced_raft_rpc_scheduling_group { *this, "ENFORCED_RAFT_RPC_SCHEDULING_GROUP"sv };
+    gms::feature load_and_stream_abort_rpc_message { *this, "LOAD_AND_STREAM_ABORT_RPC_MESSAGE"sv };
 public:
 
     const std::unordered_map<sstring, std::reference_wrapper<feature>>& registered_features() const;
